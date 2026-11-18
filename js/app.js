@@ -21,7 +21,7 @@ const ROLE_NAME = { owner: "系統管理者", admin: "管理者", staff: "工作
 let guests = [], cfg = { event: "", notice: "" }, loaded = false;
 let prevStatus = new Map(), fresh = new Set(), scanId = null, reviewKey = "";
 let expTab = CATS[0], stageTab = CATS[0], pPage = 0, dPage = 0;
-let curPending = [], curTabIds = [], drag = null, unsubs = [];
+let curPending = [], curTabIds = [], drag = null, unsubs = [], requests = [];
 try { const t = localStorage.getItem("liyu-exp-tab"); if (CATS.includes(t)) expTab = t; } catch (e) {}
 try { const t = localStorage.getItem("liyu-stage-tab"); if (CATS.includes(t)) stageTab = t; } catch (e) {}
 
@@ -48,7 +48,7 @@ function orderPending(list) {
 }
 
 // ---------- 畫面切換 ----------
-const VIEWS = ["reception", "stage", "guests"];
+const VIEWS = ["reception", "stage", "guests", "system"];
 function showView(v) {
   ["landing", ...VIEWS].forEach(x => $("#v-" + x).hidden = x !== v);
   $("#tabs").hidden = v === "landing";
@@ -59,11 +59,13 @@ function route() {
   if (!isStaff) { showView("landing"); render(); return; }
   const h = location.hash.replace("#", "");
   if (h.startsWith("g-")) { scanId = h.slice(2); showView("reception"); render(); return; }
-  showView(VIEWS.includes(h) ? h : "reception"); render();
+  let v = VIEWS.includes(h) ? h : "reception";
+  if (v === "system" && !isOwner) v = "reception";
+  showView(v); render();
 }
 window.addEventListener("hashchange", route);
 
-function setStatus(m, warn) { ["#st1", "#st2", "#st3"].forEach(s => { $(s).textContent = m; $(s).classList.toggle("warn", !!warn); }); }
+function setStatus(m, warn) { ["#st1", "#st2", "#st3", "#st4"].forEach(s => { $(s).textContent = m; $(s).classList.toggle("warn", !!warn); }); }
 
 // ---------- QR ----------
 let qrKey = "";
@@ -155,7 +157,9 @@ function render() {
   $("#doneList").innerHTML = done.length ? done.slice(dStart, dStart + D_SIZE).map(g => `<li class="dcard"><span class="ord">✓</span><span class="dinfo"><span class="line">${esc(who(g))}</span><span class="meta">${fmt(g.introducedAt)} 介紹</span></span><button class="btn sm ghost" data-act="back" data-id="${g.id}">↩ 送回待介紹</button></li>`).join("") : `<li class="empty">尚無</li>`;
 
   // 名單與 QR
-  $("#cfgPanel").hidden = !isAdmin; $("#staffPanel").hidden = !isAdmin;
+  $("#cfgPanel").hidden = !isAdmin; $("#staffPanel").hidden = !isAdmin || isOwner;
+  $("#sysTab").hidden = !isOwner;
+  renderSystem();
   document.querySelectorAll(".admin-only").forEach(el => el.hidden = !isAdmin);
   document.querySelector(".admin-note").hidden = isAdmin;
   const total = guests.length, arr = guests.filter(g => g.status === "arrived" || g.status === "introduced").length;
@@ -413,6 +417,97 @@ $("#dlSheet").addEventListener("click", () => {
   cv.toBlob(blob => saveBlob(blob, "來賓報到QR總表.png"), "image/png");
 });
 
+
+// ---------- 系統管理（只有系統管理者） ----------
+const ROLE_LABEL = { admins: "管理者", emails: "工作人員" };
+const EMAIL_RE = /^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/;
+async function writeStaff(next, okMsg) {
+  next = { owner: me.email, admins: [...new Set(next.admins)].filter(e => e !== me.email), emails: [...new Set(next.emails)].filter(e => e !== me.email) };
+  next.emails = next.emails.filter(e => !next.admins.includes(e));
+  try { await setDoc(doc(db, "settings", "staff"), next); if (okMsg) toast(okMsg); return true; }
+  catch (e) { toast("更新失敗：只有系統管理者能調整管理者"); return false; }
+}
+const cur = () => ({ admins: [...(staffDoc.admins || [])], emails: [...(staffDoc.emails || [])] });
+
+function renderSystem() {
+  if (!isOwner) return;
+  const rb = $("#reqBadge"); rb.hidden = !requests.length; rb.textContent = requests.length;
+  $("#reqPanel").hidden = false;
+  $("#reqList").innerHTML = requests.length ? requests.map(r => `<li class="g"><div class="info"><span class="nm">${esc(r.name || "（未提供姓名）")}</span><div class="tt">${esc(r.email)}・${fmt(r.createdAt)} 申請</div></div><div class="btnrow"><button class="btn sm" data-act="reqok" data-id="${r.id}" data-role="admins">設為管理者</button><button class="btn sm ghost" data-act="reqok" data-id="${r.id}" data-role="emails">設為工作人員</button><button class="btn sm danger" data-act="reqno" data-id="${r.id}">拒絕</button></div></li>`).join("") : `<li class="empty">目前沒有待核准的申請。</li>`;
+  const a = staffDoc.admins || [], st = staffDoc.emails || [];
+  $("#si-owner").textContent = staffDoc.owner || me.email;
+  $("#si-admins").textContent = `${a.length} 位`;
+  $("#si-staff").textContent = `${st.length} 位`;
+  $("#si-guests").textContent = `${guests.length} 筆`;
+  const row = (e, role) => `<tr><td>${esc(e)}</td><td><select data-rolesel="${esc(e)}" aria-label="${esc(e)} 的身分"><option value="admins"${role === "admins" ? " selected" : ""}>管理者</option><option value="emails"${role === "emails" ? " selected" : ""}>工作人員</option></select></td><td><span data-rmbox="${esc(e)}"><button class="btn sm danger" data-act="sysask" data-email="${esc(e)}">移除</button></span></td></tr>`;
+  $("#roleTable").innerHTML = `<thead><tr><th>帳號</th><th>身分</th><th></th></tr></thead><tbody><tr><td>${esc(staffDoc.owner || me.email)} <b>（你）</b></td><td><span class="rolepill">系統管理者</span></td><td></td></tr>${a.map(e => row(e, "admins")).join("")}${st.map(e => row(e, "emails")).join("")}${!a.length && !st.length ? `<tr><td colspan="3" class="hint">還沒有其他帳號。用上方「批次加入」或核准老師的申請。</td></tr>` : ""}</tbody>`;
+}
+
+document.addEventListener("change", async e => {
+  const sel = e.target.closest("[data-rolesel]"); if (!sel || !isOwner) return;
+  const email = sel.dataset.rolesel, to = sel.value, n = cur();
+  n.admins = n.admins.filter(x => x !== email); n.emails = n.emails.filter(x => x !== email);
+  n[to].push(email);
+  await writeStaff(n, `${email} 已改為${ROLE_LABEL[to]}`);
+});
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-act]"); if (!b || !isOwner) return;
+  const act = b.dataset.act;
+  if (act === "sysask") { const em = b.dataset.email; document.querySelector(`[data-rmbox="${CSS.escape(em)}"]`).innerHTML = `<span class="confirm">確定移除？<button class="btn sm danger" data-act="sysrm" data-email="${esc(em)}">移除</button><button class="btn sm ghost" data-act="sysno">取消</button></span>`; return; }
+  if (act === "sysno") { render(); return; }
+  if (act === "sysrm") { const em = b.dataset.email, n = cur(); n.admins = n.admins.filter(x => x !== em); n.emails = n.emails.filter(x => x !== em); await writeStaff(n, `已移除 ${em}`); return; }
+  if (act === "reqok" || act === "reqno") {
+    const r = requests.find(x => x.id === b.dataset.id); if (!r) return; b.disabled = true;
+    try {
+      const batch = writeBatch(db);
+      if (act === "reqok") {
+        const n = cur(), role = b.dataset.role, em = String(r.email || "").toLowerCase();
+        n.admins = n.admins.filter(x => x !== em); n.emails = n.emails.filter(x => x !== em); n[role].push(em);
+        batch.set(doc(db, "settings", "staff"), { owner: me.email, admins: [...new Set(n.admins)], emails: [...new Set(n.emails)].filter(x => !n.admins.includes(x)) });
+      }
+      batch.delete(doc(db, "requests", r.id));
+      await batch.commit();
+      toast(act === "reqok" ? `已核准 ${r.email} 為${ROLE_LABEL[b.dataset.role]}` : `已拒絕 ${r.email}`);
+    } catch (err) { toast("處理失敗，請再試一次"); b.disabled = false; }
+  }
+});
+
+$("#batchBtn").addEventListener("click", async () => {
+  const role = (document.querySelector("input[name=batchRole]:checked") || {}).value || "admins";
+  const items = $("#batchEmails").value.split(/[\s,;，、]+/).map(x => x.trim().toLowerCase()).filter(Boolean);
+  if (!items.length) { $("#batchMsg").textContent = "請先貼上 email。"; return; }
+  const bad = items.filter(x => !EMAIL_RE.test(x)), good = [...new Set(items.filter(x => EMAIL_RE.test(x)))].filter(x => x !== me.email);
+  const n = cur(), already = good.filter(x => n[role].includes(x) || (role === "emails" && n.admins.includes(x)));
+  const add = good.filter(x => !already.includes(x));
+  if (!add.length) { $("#batchMsg").textContent = `沒有新增任何人${already.length ? `（${already.length} 位已在名單中；要把管理者降為工作人員，請在下方權限總覽切換）` : ""}${bad.length ? `，${bad.length} 筆格式不對` : ""}。`; return; }
+  const other = role === "admins" ? "emails" : "admins";
+  n[other] = n[other].filter(x => !add.includes(x)); n[role].push(...add);
+  if (await writeStaff(n, `已加入 ${add.length} 位${ROLE_LABEL[role]}`)) {
+    $("#batchEmails").value = bad.join("\n");
+    $("#batchMsg").textContent = `已加入 ${add.length} 位${already.length ? `，略過 ${already.length} 位（已在名單中）` : ""}${bad.length ? `，${bad.length} 筆格式不對，留在框內請修正` : ""}。`;
+  }
+});
+
+// ---------- 沒有權限的人：申請使用權限 ----------
+async function showRequestBox(u) {
+  $("#requestBox").hidden = false; $("#requestBtn").hidden = false;
+  $("#requestMsg").textContent = "送出後，請系統管理者核准，核准後重新整理頁面即可使用。";
+  try {
+    const r = await getDoc(doc(db, "requests", u.uid));
+    if (r.exists()) { $("#requestBtn").hidden = true; $("#requestMsg").textContent = `已在 ${fmt(r.data().createdAt)} 送出申請，等待系統管理者核准。核准後重新整理頁面即可使用。`; }
+  } catch (e) {}
+}
+$("#requestBtn").addEventListener("click", async () => {
+  const u = auth.currentUser; if (!u) return;
+  const b = $("#requestBtn"); b.disabled = true;
+  try {
+    await setDoc(doc(db, "requests", u.uid), { email: (u.email || "").toLowerCase(), name: (u.displayName || "").slice(0, 60), createdAt: Date.now() });
+    b.hidden = true; $("#requestMsg").textContent = "申請已送出，請通知系統管理者核准。核准後重新整理頁面即可使用。";
+  } catch (e) { $("#requestMsg").textContent = "申請送出失敗，請稍後再試，或直接聯絡系統管理者。"; }
+  b.disabled = false;
+});
+
 // ---------- 提示音 ----------
 let chimeCtx = null;
 $("#chime").addEventListener("change", e => { if (e.target.checked) { try { chimeCtx = chimeCtx || new (window.AudioContext || window.webkitAudioContext)(); chimeCtx.resume(); ding(false); } catch (err) {} } });
@@ -479,7 +574,7 @@ async function confirmSelf(id, first) {
 }
 
 // ---------- 登入與資料連線 ----------
-function stopListeners() { unsubs.forEach(u => u()); unsubs = []; guests = []; loaded = false; prevStatus = new Map(); }
+function stopListeners() { unsubs.forEach(u => u()); unsubs = []; guests = []; requests = []; loaded = false; prevStatus = new Map(); }
 
 function startListeners() {
   setStatus("連線中…");
@@ -508,6 +603,15 @@ function startListeners() {
     if (s.exists()) { staffDoc = s.data(); applyRole(roleOf(staffDoc)); }
     render();
   }, () => {}));
+  if (isOwner) {
+    let firstReq = true;
+    unsubs.push(onSnapshot(query(collection(db, "requests"), orderBy("createdAt", "asc"), limit(200)), snap => {
+      const before = requests.length;
+      requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (!firstReq && requests.length > before) toast("有老師申請使用權限，請到「系統管理」核准");
+      firstReq = false; render();
+    }, () => {}));
+  }
 }
 
 // 活動名稱公開可讀，首頁也看得到
@@ -578,7 +682,7 @@ async function handleUser(u) {
   stopListeners();
   me = u && !u.isAnonymous ? { email: (u.email || "").toLowerCase(), displayName: u.displayName || "" } : null;
   $("#userName").hidden = !me; $("#logoutBtn").hidden = !me;
-  $("#loginForms").hidden = !!me; $("#verifyBox").hidden = true; $("#loginErr").hidden = true;
+  $("#loginForms").hidden = !!me; $("#verifyBox").hidden = true; $("#requestBox").hidden = true; $("#loginErr").hidden = true;
   applyRole("none");
   if (me) {
     const isPw = (u.providerData || []).some(p => p.providerId === "password");
@@ -591,7 +695,7 @@ async function handleUser(u) {
     let r = "none";
     try { r = await checkStaff(); } catch (e) { $("#loginErr").textContent = "無法連線資料庫，請稍後重新整理。"; $("#loginErr").hidden = false; }
     applyRole(r);
-    if (!isStaff) $("#loginMsg").textContent = `${me.email} 還沒有使用權限。請管理者在「名單與 QR → 帳號與權限」加入這個帳號後，重新整理頁面。`;
+    if (!isStaff) { $("#loginMsg").textContent = `${me.email} 還沒有使用權限。`; showRequestBox(u); }
     else startListeners();
   } else $("#loginMsg").textContent = "接待老師、司儀與校長請登入後使用。";
   route();

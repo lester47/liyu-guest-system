@@ -24,6 +24,7 @@
       <a href="#reception" data-view="reception">接待報到<span class="badge" id="reviewBadge" hidden>0</span></a>
       <a href="#stage" data-view="stage">介紹台<span class="badge" id="pendBadge" hidden>0</span></a>
       <a href="#guests" data-view="guests">名單與 QR</a>
+      <a href="#system" data-view="system" id="sysTab" hidden>系統管理<span class="badge" id="reqBadge" hidden>0</span></a>
     </nav>
   </div>
 </header>
@@ -52,6 +53,9 @@
           </div>
           <div class="btnrow" style="align-items:center"><button class="btn ghost" type="submit" id="pwBtn">登入</button><button class="linkbtn" type="button" id="forgotBtn">忘記密碼</button></div>
         </form>
+      </div>
+      <div id="requestBox" class="adm" hidden>
+        <div class="btnrow" style="align-items:center"><button class="btn koi" type="button" id="requestBtn">申請使用權限</button><span class="hint" id="requestMsg">送出後，請系統管理者核准，核准後重新整理頁面即可使用。</span></div>
       </div>
       <div id="verifyBox" class="adm" hidden>
         <p style="margin:0">已寄出驗證信到 <b id="verifyEmail"></b>。請到信箱點驗證連結，回到這裡按「我已完成驗證」。</p>
@@ -210,6 +214,53 @@
           <p class="hint" style="margin:0;flex:1 1 200px">老師掃這張打開接待報到頁，第一次要用 Google 帳號登入，而且帳號要先加到上方的工作人員名單。</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- 系統管理（只有系統管理者） -->
+  <section id="v-system" class="wrap wide" hidden>
+    <div class="status-line" id="st4"></div>
+
+    <div class="panel sysreq" id="reqPanel">
+      <h2 class="sec">待核准的申請 <span class="hint">老師用自己的帳號登入後按「申請使用權限」，會出現在這裡</span></h2>
+      <ul class="glist" id="reqList"></ul>
+    </div>
+
+    <div class="row2" style="align-items:start">
+      <div class="panel">
+        <h2 class="sec">批次加入 <span class="hint">一行一個 email，也可用逗號或空白分隔</span></h2>
+        <textarea id="batchEmails" placeholder="wang@liwps.ntct.edu.tw&#10;lin@liwps.ntct.edu.tw&#10;chen@liwps.ntct.edu.tw"></textarea>
+        <div class="field"><span class="lbl">設為</span>
+          <div class="chips" role="radiogroup" aria-label="設為哪種權限">
+            <input type="radio" name="batchRole" id="br-admin" value="admins" checked><label for="br-admin">管理者</label>
+            <input type="radio" name="batchRole" id="br-staff" value="emails"><label for="br-staff">工作人員</label>
+          </div>
+        </div>
+        <div class="btnrow" style="align-items:center"><button class="btn" type="button" id="batchBtn">加入</button><span class="hint" id="batchMsg"></span></div>
+      </div>
+
+      <div class="panel">
+        <h2 class="sec">系統資訊</h2>
+        <dl class="sysinfo">
+          <dt>系統管理者</dt><dd id="si-owner"></dd>
+          <dt>管理者</dt><dd id="si-admins"></dd>
+          <dt>工作人員</dt><dd id="si-staff"></dd>
+          <dt>來賓資料</dt><dd id="si-guests"></dd>
+        </dl>
+        <div class="field"><span class="lbl">常用後台連結</span>
+          <ul class="links">
+            <li><a href="https://console.firebase.google.com/project/liyu-guest/authentication/users" target="_blank" rel="noopener">Firebase：登入過的使用者／建立帳號密碼</a></li>
+            <li><a href="https://console.firebase.google.com/project/liyu-guest/firestore/databases/-default-/rules" target="_blank" rel="noopener">Firebase：安全規則</a></li>
+            <li><a href="https://console.firebase.google.com/project/liyu-guest/authentication/settings" target="_blank" rel="noopener">Firebase：授權網域</a></li>
+            <li><a href="https://github.com/lester47/liyu-guest-system" target="_blank" rel="noopener">GitHub：程式碼</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 class="sec">權限總覽 <span class="hint">切換身分會立即生效，對方重新整理頁面後套用</span></h2>
+      <div class="tblwrap"><table class="prev roles" id="roleTable"></table></div>
     </div>
   </section>
 </main>

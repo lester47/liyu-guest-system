@@ -211,3 +211,12 @@ input[type=password]:focus-visible{outline:2px solid var(--pond);outline-offset:
 .rv input[type=text]{padding:8px 10px}
 .rv .match{font-size:.82rem;color:var(--fg)}
 .rv .match b{color:var(--pond)}
+.sysreq{border:2px solid var(--gold)}
+.sysinfo{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;font-size:.92rem}
+.sysinfo dt{color:var(--muted)}
+.sysinfo dd{margin:0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.links{margin:0;padding-left:1.2em;display:grid;gap:4px;font-size:.92rem}
+.links a{color:var(--pond)}
+table.roles td select{width:auto;padding:5px 8px}
+table.roles td{vertical-align:middle}
+.rolepill{font-size:.75rem;font-weight:700;padding:1px 9px;border-radius:99px;background:var(--pond);color:var(--pond-ink)}

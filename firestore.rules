@@ -81,6 +81,18 @@ service cloud.firestore {
         || (isStaff() && resource.data.source in ['walkin', 'self']);
     }
 
+    // 申請使用權限：已驗證的 Google／帳號密碼使用者可送出自己的一筆申請
+    //   只有系統管理者能看清單、核准（刪除申請）；申請人只能看自己的那一筆
+    match /requests/{uid} {
+      allow get: if isOwner() || (request.auth != null && request.auth.uid == uid);
+      allow list, delete: if isOwner();
+      allow create: if isStaffLogin() && uid == request.auth.uid && !isStaff()
+        && request.resource.data.keys().hasOnly(['email', 'name', 'createdAt'])
+        && request.resource.data.email == myEmail()
+        && request.resource.data.name is string && request.resource.data.name.size() <= 60
+        && request.resource.data.createdAt is number;
+    }
+
     // 其他路徑一律拒絕
     match /{document=**} {
       allow read, write: if false;
