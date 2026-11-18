@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// 鯉魚國小來賓通報系統 Firestore 安全規則
+// 貼到 Firebase 主控台 → Firestore Database → 規則 → 發布
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isGoogle() {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+    function myEmail() { return request.auth.token.email.lower(); }
+    function staffPath() { return /databases/$(database)/documents/settings/staff; }
+    function staffList() { return get(staffPath()).data; }
+    function isAdmin() {
+      return isGoogle() && exists(staffPath()) && myEmail() in staffList().admins;
+    }
+    function isStaff() {
+      return isGoogle() && exists(staffPath())
+        && (myEmail() in staffList().admins || myEmail() in staffList().emails);
+    }
+
+    // 來賓自己掃 QR 送出的資料：只能新增「已到場」的一筆，欄位與長度都受限
+    function validSelf() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['title', 'name', 'cat', 'first', 'status', 'source', 'createdAt', 'arrivedAt'])
+        && d.status == 'arrived' && d.source == 'self' && d.first == false
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 20
+        && d.title is string && d.title.size() <= 60
+        && d.cat in ['長官', '貴賓', '家長', '其他']   // 若改了 js/config.js 的 CATS，這裡也要一起改
+        && d.createdAt is number && d.arrivedAt is number;
+    }
+
+    // 工作人員與管理者名單
+    match /settings/staff {
+      allow get: if isStaff();
+      // 系統第一次使用：第一位用 Google 登入的人可以把自己設為管理者（名單已存在就不能再建立）
+      allow create: if isGoogle()
+        && request.resource.data.keys().hasOnly(['admins', 'emails'])
+        && request.resource.data.admins == [myEmail()]
+        && request.resource.data.emails == [];
+      // 只有管理者能改名單，而且不能把自己從管理者移除
+      allow update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['admins', 'emails'])
+        && request.resource.data.admins is list
+        && request.resource.data.emails is list
+        && myEmail() in request.resource.data.admins;
+      allow delete: if false;
+    }
+
+    // 活動名稱與給司儀的提醒：大家都能讀（來賓頁要顯示活動名稱），只有管理者能改
+    match /settings/event {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // 來賓名單：工作人員可讀寫；來賓（匿名登入）只能新增自己的報到
+    match /guests/{id} {
+      allow read, update, delete: if isStaff();
+      allow create: if isStaff() || (request.auth != null && validSelf());
+    }
+
+    // 其他路徑一律拒絕
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
