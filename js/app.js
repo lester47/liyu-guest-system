@@ -489,6 +489,74 @@ $("#batchBtn").addEventListener("click", async () => {
   }
 });
 
+// 從外部檔案匯入工作人員／管理者
+let staffRows = [];
+function planStaffImport() {
+  const def = (document.querySelector("input[name=batchRole]:checked") || {}).value || "admins";
+  const n = cur(), seen = new Set();
+  return staffRows.map(r => {
+    const role = r.role || def; let st = "new";
+    if (!EMAIL_RE.test(r.email)) st = "bad";
+    else if (r.email === (staffDoc.owner || me.email)) st = "owner";
+    else if (seen.has(r.email)) st = "dup";
+    else if (n[role].includes(r.email)) st = "same";
+    else if (role === "emails" && n.admins.includes(r.email)) st = "isadmin";
+    else if (role === "admins" && n.emails.includes(r.email)) st = "promote";
+    seen.add(r.email);
+    return { ...r, role, st };
+  });
+}
+const ST_TEXT = { new: "新增", promote: "工作人員 → 升為管理者", same: "已在名單，略過", isadmin: "已是管理者，略過", owner: "系統管理者本人，略過", dup: "檔案內重複，略過", bad: "email 格式不對，略過" };
+function drawStaffPrev() {
+  const plan = planStaffImport(), ok = plan.filter(x => x.st === "new" || x.st === "promote");
+  $("#staffPrevTbl").innerHTML = `<thead><tr><th>#</th><th>姓名</th><th>email</th><th>設為</th><th>結果</th></tr></thead><tbody>` + plan.slice(0, 300).map((x, i) => `<tr class="${x.st === "new" || x.st === "promote" ? "" : "dup"}"><td>${i + 1}</td><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${ROLE_LABEL[x.role]}</td><td>${ST_TEXT[x.st]}</td></tr>`).join("") + `</tbody>`;
+  $("#staffImpInfo").textContent = `將加入 ${ok.length} 位，略過 ${plan.length - ok.length} 位`;
+  $("#staffImpGo").disabled = !ok.length;
+}
+$("#staffPick").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#staffFile").click(); } });
+document.querySelectorAll("input[name=batchRole]").forEach(r => r.addEventListener("change", () => { if (staffRows.length) drawStaffPrev(); }));
+$("#staffFile").addEventListener("change", async e => {
+  const f = e.target.files[0], err = $("#staffImpErr"); err.hidden = true; if (!f) return;
+  try {
+    await loadXLSX();
+    const buf = await f.arrayBuffer(); let wb;
+    if (/\.csv$/i.test(f.name)) {
+      let txt = new TextDecoder("utf-8").decode(buf);
+      if (txt.includes("�")) { try { txt = new TextDecoder("big5").decode(buf); } catch (x) {} }
+      wb = XLSX.read(txt.replace(/^﻿/, ""), { type: "string" });
+    } else wb = XLSX.read(buf, { type: "array" });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", blankrows: false }).map(r => r.map(c => String(c).trim()));
+    if (!rows.length) throw new Error("empty");
+    const head = rows[0], find = re => head.findIndex(h => re.test(h));
+    const hasHeader = !head.some(c => EMAIL_RE.test(c.toLowerCase()));
+    let ec = hasHeader ? find(/mail|郵件|信箱|帳號|account/i) : -1;
+    const rc = hasHeader ? find(/身分|身份|權限|角色|類別|role/i) : -1;
+    const nc = hasHeader ? find(/姓名|名字|老師|name/i) : -1;
+    const body = hasHeader ? rows.slice(1) : rows;
+    staffRows = body.map(r => {
+      let email = ec >= 0 ? (r[ec] || "") : "";
+      if (!EMAIL_RE.test(email.toLowerCase())) email = r.find(c => EMAIL_RE.test(c.toLowerCase())) || email;
+      const rv = rc >= 0 ? r[rc] || "" : "";
+      const role = /管理/.test(rv) ? "admins" : /工作|人員|staff/i.test(rv) ? "emails" : "";
+      return { email: email.toLowerCase(), name: nc >= 0 ? r[nc] || "" : "", role };
+    }).filter(x => x.email || x.name);
+    if (!staffRows.length) throw new Error("noemail");
+    $("#staffPrev").hidden = false; drawStaffPrev();
+  } catch (ex) {
+    err.textContent = ex && ex.message === "load" ? "讀檔工具載入失敗，請確認網路後再試。" : ex && (ex.message === "empty" || ex.message === "noemail") ? "檔案裡找不到 email，請確認有一欄是老師的 email。" : "無法讀取這個檔案，請確認是 .xlsx、.xls 或 .csv。";
+    err.hidden = false; staffRows = []; $("#staffPrev").hidden = true;
+  }
+  e.target.value = "";
+});
+$("#staffImpCancel").addEventListener("click", () => { staffRows = []; $("#staffPrev").hidden = true; });
+$("#staffImpGo").addEventListener("click", async () => {
+  const plan = planStaffImport().filter(x => x.st === "new" || x.st === "promote"); if (!plan.length) return;
+  const n = cur();
+  plan.forEach(x => { n.admins = n.admins.filter(e => e !== x.email); n.emails = n.emails.filter(e => e !== x.email); n[x.role].push(x.email); });
+  const na = plan.filter(x => x.role === "admins").length, ns = plan.length - na;
+  if (await writeStaff(n, `已匯入：管理者 ${na} 位、工作人員 ${ns} 位`)) { staffRows = []; $("#staffPrev").hidden = true; }
+});
+
 // ---------- 沒有權限的人：申請使用權限 ----------
 async function showRequestBox(u) {
   $("#requestBox").hidden = false; $("#requestBtn").hidden = false;

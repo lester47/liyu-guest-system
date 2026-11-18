@@ -237,6 +237,18 @@
           </div>
         </div>
         <div class="btnrow" style="align-items:center"><button class="btn" type="button" id="batchBtn">加入</button><span class="hint" id="batchMsg"></span></div>
+        <div class="orline"><span>或從外部檔案匯入</span></div>
+        <div class="btnrow" style="align-items:center">
+          <label class="btn ghost" for="staffFile" tabindex="0" id="staffPick">選擇檔案（Excel／CSV）</label>
+          <input type="file" id="staffFile" accept=".xlsx,.xls,.csv,text/csv" hidden>
+          <a class="btn ghost" href="templates/staff-template.csv" download>下載範本</a>
+        </div>
+        <p class="hint" style="margin:0">會自動找出 email 欄位；檔案裡若有「身分」欄（填管理者或工作人員），每一列依該欄設定，沒有就用上方選的身分。</p>
+        <div id="staffPrev" class="adm" hidden>
+          <div class="tblwrap"><table class="prev" id="staffPrevTbl"></table></div>
+          <div class="btnrow" style="align-items:center"><button class="btn koi" type="button" id="staffImpGo">匯入</button><button class="btn ghost" type="button" id="staffImpCancel">取消</button><span class="hint" id="staffImpInfo"></span></div>
+        </div>
+        <div class="err" id="staffImpErr" hidden></div>
       </div>
 
       <div class="panel">
