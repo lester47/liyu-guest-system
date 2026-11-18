@@ -8,12 +8,12 @@
 //    這些值本來就會出現在網頁原始碼裡，放到 GitHub 是正常的；
 //    資料安全由 firestore.rules 控管。
 export const firebaseConfig = {
-  apiKey: "請貼上你的 apiKey",
-  authDomain: "你的專案.firebaseapp.com",
-  projectId: "你的專案",
-  storageBucket: "你的專案.appspot.com",
-  messagingSenderId: "000000000000",
-  appId: "1:000000000000:web:0000000000000000"
+  apiKey: "AIzaSyBM8mIAVjryNbD_ELOaiSv-NROdILau2ds",
+  authDomain: "liyu-guest.firebaseapp.com",
+  projectId: "liyu-guest",
+  storageBucket: "liyu-guest.firebasestorage.app",
+  messagingSenderId: "150463961873",
+  appId: "1:150463961873:web:eb28ed05e372d085218ab0"
 };
 
 // 2. 學校與活動名稱（活動名稱之後也能在網站的「名單與 QR」頁修改）
