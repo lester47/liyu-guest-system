@@ -71,18 +71,27 @@
   <!-- 接待報到 -->
   <section id="v-reception" class="wrap" hidden>
     <div class="status-line" id="st1"></div>
+    <div class="deliv" id="delivBar" role="status" hidden></div>
     <div class="scan" id="scanCard" hidden></div>
+
+    <!-- 工作台：固定在上方的搜尋＋兩個入口 -->
+    <div class="desk" id="desk">
+      <input type="search" id="q" placeholder="搜尋來賓：姓名或頭銜，例：縣長、前山" aria-label="搜尋來賓" autocomplete="off" enterkeyhint="search">
+      <div class="desk-btns">
+        <button class="btn ghost" type="button" id="goWalk">＋ 臨時來賓</button>
+        <button class="btn gold" type="button" id="goReview" hidden>自助待確認 <b id="rvCount">0</b> 筆</button>
+      </div>
+    </div>
+
+    <div class="panel" id="expPanel">
+      <h2 class="sec" id="expTitle">預約來賓 <span class="hint">掃來賓的 QR Code，或在上方搜尋後點「報到」</span></h2>
+      <div class="subtabs" role="tablist" aria-label="預約來賓分類" id="subtabs"></div>
+      <ul class="glist" id="expList"></ul>
+    </div>
 
     <div class="panel review" id="reviewPanel" hidden>
       <h2 class="sec">待確認的自助報到 <span class="hint">來賓自己掃 QR 填的；確認無誤才會送上介紹台，惡作劇請直接刪除</span></h2>
       <ul class="glist" id="reviewList"></ul>
-    </div>
-
-    <div class="panel">
-      <h2 class="sec">預約來賓 <span class="hint">掃來賓的 QR Code，或在這裡搜尋後點「報到」</span></h2>
-      <div class="subtabs" role="tablist" aria-label="預約來賓分類" id="subtabs"></div>
-      <input type="search" id="q" placeholder="輸入姓名或頭銜，例：縣長、前山" aria-label="搜尋預約來賓">
-      <ul class="glist" id="expList"></ul>
     </div>
 
     <form class="panel" id="walkForm" novalidate>
@@ -100,15 +109,18 @@
     </form>
 
     <div class="panel">
-      <h2 class="sec">剛剛通報 <span class="hint">按錯可以撤回；<span class="self">自助</span> 是來賓自己掃 QR 填、經老師確認的</span></h2>
+      <h2 class="sec">剛剛通報 <span class="hint">看到「✓ 已送達介紹台」才代表司儀那邊收到了；按錯可以撤回；<span class="self">自助</span> 是來賓自己掃 QR 填、經老師確認的</span></h2>
       <ul class="glist" id="recentList"></ul>
     </div>
   </section>
 
   <!-- 介紹台 -->
   <section id="v-stage" class="wrap wide" hidden>
-    <div class="status-line" id="st2"></div>
+    <div class="status-line big" id="st2"></div>
     <div class="notice" id="notice" hidden><b>提醒</b><span></span></div>
+    <div class="firstalert" id="firstAlert" role="alert" hidden></div>
+    <div class="nextbox" id="nextBox"></div>
+    <div class="undo" id="undoBar" role="status" hidden></div>
     <div class="stage">
       <div class="zone">
         <h3>待介紹 <span class="n" id="n-pend">0</span></h3>
@@ -140,6 +152,21 @@
         <div class="field"><label for="c-notice">給司儀的提醒（介紹台上方顯示）</label><input type="text" id="c-notice" maxlength="120" placeholder="例：開幕式 9:30，長官致詞前先介紹"></div>
       </div>
       <div><button class="btn" id="saveCfg" type="button">儲存設定</button></div>
+    </div>
+
+    <div class="panel" id="eventPanel">
+      <h2 class="sec">活動紀錄與匯出 <span class="hint">每場活動結束後「結案封存」，名單清空再開下一場；封存的活動可以隨時匯出或切換回來</span></h2>
+      <div class="btnrow">
+        <button class="btn ghost" type="button" id="csvNow">匯出目前名單（CSV）</button>
+        <button class="btn koi" type="button" id="askClose" hidden>結案封存，開始下一場</button>
+      </div>
+      <div class="closebox adm" id="closeBox" hidden>
+        <p style="margin:0" id="closeSum"></p>
+        <div class="field"><label for="nextEvent">下一場活動名稱 <span class="hint">（可留空，沿用目前名稱，之後再改）</span></label><input type="text" id="nextEvent" maxlength="40" placeholder="例：115學年度運動會"></div>
+        <div class="err" id="closeErr" hidden></div>
+        <div class="btnrow"><button class="btn koi" type="button" id="doClose">確定結案封存</button><button class="btn ghost" type="button" id="noClose">取消</button></div>
+      </div>
+      <div class="field"><span class="lbl">已結案的活動</span><ul class="glist" id="archList"></ul></div>
     </div>
 
     <div class="panel" id="staffPanel" hidden>

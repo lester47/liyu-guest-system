@@ -5,12 +5,13 @@ import {
   collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit,
   writeBatch, runTransaction
 } from "./firebase.js";
-import { $, fmt, esc, newId, toast, startClock, siteBase, qrCanvas, saveBlob } from "./utils.js";
+import { $, pad, fmt, esc, newId, toast, startClock, siteBase, qrCanvas, saveBlob } from "./utils.js";
 import { SCHOOL, CATS } from "./config.js";
 
 const LAST = CATS[CATS.length - 1];
 const catRank = c => { const i = CATS.indexOf(c); return i < 0 ? 99 : i; };
 const grpOf = g => CATS.includes(g.cat) ? g.cat : LAST;
+const nameKey = s => (s || "").replace(/\s/g, "");
 const who = g => `${g.title ? g.title + " " : ""}${g.name || ""}`.trim();
 const catPill = c => `<span class="cat${c === CATS[0] ? " c0" : ""}">${esc(c)}</span>`;
 const P_SIZE = 8, D_SIZE = 15;
@@ -22,6 +23,14 @@ let guests = [], cfg = { event: "", notice: "" }, loaded = false;
 let prevStatus = new Map(), fresh = new Set(), scanId = null, reviewKey = "";
 let expTab = CATS[0], stageTab = CATS[0], pPage = 0, dPage = 0;
 let curPending = [], curTabIds = [], drag = null, unsubs = [], requests = [];
+// 送達確認：hasPendingWrites 的資料代表「這台裝置寫了、伺服器還沒確認」
+const SLOW_MS = 6000;
+let pendSince = new Map(), ackWatch = new Map(), connErr = "";
+let conn = { online: false, syncedAt: 0, updatedAt: 0, offlineSince: 0, startedAt: 0 };
+// 介紹台「下一位」
+let nextId = null, pinned = false, knownFirst = new Set(), firstAlertId = null, dismissed = new Set(), forceNext = null, undoInfo = null;
+// 活動紀錄
+let archives = [], archErr = "", archAsk = null;
 try { const t = localStorage.getItem("liyu-exp-tab"); if (CATS.includes(t)) expTab = t; } catch (e) {}
 try { const t = localStorage.getItem("liyu-stage-tab"); if (CATS.includes(t)) stageTab = t; } catch (e) {}
 
@@ -65,7 +74,29 @@ function route() {
 }
 window.addEventListener("hashchange", route);
 
-function setStatus(m, warn) { ["#st1", "#st2", "#st3", "#st4"].forEach(s => { $(s).textContent = m; $(s).classList.toggle("warn", !!warn); }); }
+// ---------- 連線狀態（每個分頁上方常駐顯示） ----------
+const hms = ms => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+function setStatus(m) { connErr = m || ""; renderConn(); }
+function renderConn() {
+  let html, warn = false;
+  const online = conn.online && navigator.onLine !== false;
+  if (connErr) { html = esc(connErr); warn = true; }
+  else if (!conn.syncedAt) {
+    warn = conn.startedAt && Date.now() - conn.startedAt > 10000;
+    html = warn ? `<span class="dot"></span>資料暫時連不上，請確認網路` : `<span class="dot"></span>連線中…`;
+  } else if (online) html = `<span class="dot"></span>即時連線中・資料最後更新 ${hms(conn.updatedAt || conn.syncedAt)}`;
+  else { warn = true; html = `<span class="dot"></span>連線中斷${conn.offlineSince ? `（${fmt(conn.offlineSince)} 起）` : ""}・畫面停在 ${hms(conn.syncedAt)} 的狀態，可能不是最新`; }
+  ["#st1", "#st2", "#st3", "#st4"].forEach(s => { const el = $(s); el.innerHTML = html; el.classList.toggle("warn", !!warn); el.classList.toggle("ok", !warn && !!conn.syncedAt); });
+}
+window.addEventListener("offline", () => { if (conn.online) { conn.online = false; conn.offlineSince = Date.now(); } render(); });
+window.addEventListener("online", () => render());
+// 有通報還沒送到伺服器時，離開或重新整理頁面會遺失，先提醒
+window.addEventListener("beforeunload", e => { if (guests.some(g => g._pending)) { e.preventDefault(); e.returnValue = ""; } });
+// 每 3 秒檢查：讓「傳送中」超過時間後變成「尚未送達」、連線時間持續更新
+setInterval(() => { if (pendSince.size) render(); else renderConn(); }, 3000);
+
+const delivState = g => !g._pending ? "ok" : (!conn.online || navigator.onLine === false || Date.now() - (pendSince.get(g.id) || Date.now()) > SLOW_MS) ? "slow" : "sending";
+const delivTag = g => { const s = delivState(g); return s === "sending" ? `<span class="dv sending">傳送中…</span>` : s === "slow" ? `<span class="dv slow">⚠ 尚未送達</span>` : g.status === "arrived" ? `<span class="dv ok">✓ 已送達介紹台</span>` : ""; };
 
 // ---------- QR ----------
 let qrKey = "";
@@ -95,6 +126,7 @@ function render() {
   $("#heroEvent").textContent = `歡迎蒞臨 ${ev}`;
   document.title = `${ev}｜${SCHOOL.name}來賓通報`;
   if (!isStaff) return;
+  renderConn();
   const n = $("#notice"); n.hidden = !cfg.notice; n.querySelector("span").textContent = cfg.notice || "";
   const ro = !isStaff;
 
@@ -114,24 +146,33 @@ function render() {
     else { sc.className = "scan okay"; sc.innerHTML = `<div class="ttl">${esc(g.title)}</div><div class="who">${esc(g.name)}</div><div class="state">${g.status === "introduced" ? "已報到，也已介紹過" : "已報到"}（${fmt(g.arrivedAt)}）${g.first ? "・第一優先" : ""}</div><div class="btnrow" style="justify-content:center">${g.status === "arrived" && !g.first ? `<button class="btn koi sm" data-act="setfirst" data-id="${g.id}">改為第一優先</button>` : ""}<button class="btn ghost sm" data-act="closescan">完成</button></div>`; }
   } else sc.hidden = true;
 
-  // 預約來賓（四頁簽）
-  const q = $("#q").value.trim();
+  // 送達狀態橫幅
+  renderDeliv();
+
+  // 搜尋：跨所有分類，顯示未報到／已報到；沒有搜尋時才用四頁簽
+  const qRaw = $("#q").value.trim(), q = nameKey(qRaw);
+  $("#subtabs").hidden = !!q;
+  $("#expTitle").innerHTML = q ? `搜尋結果 <span class="hint">「${esc(qRaw)}」・包含已報到的來賓</span>` : `預約來賓 <span class="hint">掃來賓的 QR Code，或在上方搜尋後點「報到」</span>`;
+  if (q) { renderSearch(q, qRaw); }
+  else {
   let expAll = guests.filter(g => g.status === "expected");
-  if (q) expAll = expAll.filter(g => (g.name + g.title).includes(q));
   const ecnt = {}; CATS.forEach(c => ecnt[c] = 0); expAll.forEach(g => ecnt[grpOf(g)]++);
   document.querySelectorAll(".stab.exp").forEach(t => { const on = t.dataset.grp === expTab; t.setAttribute("aria-selected", on); t.classList.toggle("on", on); t.querySelector(".cnt").textContent = ecnt[t.dataset.grp]; });
   const exp = expAll.filter(g => grpOf(g) === expTab).sort((a, b) => (a.title || "").localeCompare(b.title || "", "zh-Hant"));
   const others = CATS.filter(c => c !== expTab && ecnt[c]).map(c => `${c} ${ecnt[c]} 位`);
   $("#expList").innerHTML = exp.length
     ? exp.slice(0, 40).map(g => `<li class="g"><div class="info">${catPill(g.cat)} <span class="nm">${esc(g.name)}</span><div class="tt">${esc(g.title)}</div></div><div class="btnrow"><button class="btn sm" data-act="arrive" data-id="${g.id}" data-first="0">報到</button><button class="btn sm koi" data-act="arrive" data-id="${g.id}" data-first="1">第一優先</button></div></li>`).join("") + (exp.length > 40 ? `<li class="empty">還有 ${exp.length - 40} 位，請輸入關鍵字縮小範圍</li>` : "")
-    : `<li class="empty">${!loaded ? "讀取中…" : others.length ? `這個頁簽沒有${q ? "符合的" : "待報到的"}來賓；其他頁簽：${others.join("、")}。` : q ? "沒有符合的預約來賓，可以用下方「臨時來賓」通報。" : guests.length ? "預約來賓都已報到。" : "還沒有預約名單。到「名單與 QR」匯入，或直接用臨時來賓通報。"}</li>`;
+    : `<li class="empty">${!loaded ? "讀取中…" : others.length ? `這個頁簽沒有待報到的來賓；其他頁簽：${others.join("、")}。` : guests.length ? "預約來賓都已報到。" : "還沒有預約名單。到「名單與 QR」匯入，或直接用臨時來賓通報。"}</li>`;
+  }
 
-  // 剛剛通報
-  const recent = guests.filter(g => g.status === "arrived" || g.status === "introduced").sort((a, b) => (b.arrivedAt || 0) - (a.arrivedAt || 0)).slice(0, 8);
-  $("#recentList").innerHTML = recent.length ? recent.map(g => `<li class="g"><div class="info">${g.first ? `<span class="first">第一優先</span> ` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span> ` : ""}<span class="nm">${esc(who(g))}</span><div class="tt">${fmt(g.arrivedAt)} 報到${g.status === "introduced" ? "・已介紹" : ""}${g.reporterName ? "・" + esc(g.reporterName) : ""}</div></div>${g.status === "introduced" ? "" : `<div class="btnrow">${g.first ? `<button class="btn sm ghost" data-act="unfirst" data-id="${g.id}">取消優先</button>` : `<button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">設第一優先</button>`}<button class="btn sm danger" data-act="undo" data-id="${g.id}">撤回</button></div>`}</li>`).join("") : `<li class="empty">還沒有人報到。</li>`;
+  // 剛剛通報（這台裝置還沒送達的排最前面）
+  const recent = guests.filter(g => g.status === "arrived" || g.status === "introduced").sort((a, b) => (b._pending ? 1 : 0) - (a._pending ? 1 : 0) || (b.arrivedAt || 0) - (a.arrivedAt || 0)).slice(0, 8);
+  $("#recentList").innerHTML = recent.length ? recent.map(g => `<li class="g${g._pending ? " pend" : ""}"><div class="info">${g.first ? `<span class="first">第一優先</span> ` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span> ` : ""}<span class="nm">${esc(who(g))}</span> ${delivTag(g)}<div class="tt">${fmt(g.arrivedAt)} 報到${g.status === "introduced" ? "・已介紹" : ""}${g.reporterName ? "・" + esc(g.reporterName) : ""}</div></div>${g.status === "introduced" ? "" : `<div class="btnrow">${g.first ? `<button class="btn sm ghost" data-act="unfirst" data-id="${g.id}">取消優先</button>` : `<button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">設第一優先</button>`}<button class="btn sm danger" data-act="undo" data-id="${g.id}">撤回</button></div>`}</li>`).join("") : `<li class="empty">還沒有人報到。</li>`;
 
-  // 介紹台（四頁簽）
+  // 介紹台：下一位
   curPending = pendingAll.map(g => g.id);
+  const nx = pickNext(pendingAll);
+  renderNext(nx, pendingAll);
   const scnt = {}, sfirst = {}, sfresh = {};
   CATS.forEach(c => { scnt[c] = 0; sfirst[c] = false; sfresh[c] = false; });
   pendingAll.forEach(g => { const c = grpOf(g); scnt[c]++; if (g.first) sfirst[c] = true; if (fresh.has(g.id)) sfresh[c] = true; });
@@ -149,7 +190,7 @@ function render() {
   const otherPend = CATS.filter(c => c !== stageTab && scnt[c]).map(c => `${c} ${scnt[c]} 位`);
   if (!drag) {
     $("#pendList").innerHTML = tabItems.length
-      ? tabItems.slice(pStart, pStart + P_SIZE).map((g, i) => `<li class="prow" data-id="${g.id}"><button class="handle" data-handle data-id="${g.id}" aria-label="拖曳或用上下鍵調整 ${esc(g.name || g.title)} 的順序">⋮⋮</button><button class="card${g.first ? " isfirst" : ""}${fresh.has(g.id) ? " fresh" : ""}" data-act="intro" data-id="${g.id}"><span class="ord">${pStart + i + 1}</span><span class="line"><small>${esc(g.title)}</small>${esc(g.name)}</span><span class="meta">${g.first ? `<span class="first">第一優先</span>` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span>` : ""}${catPill(g.cat)}${fmt(g.arrivedAt)} 到場</span></button></li>`).join("")
+      ? tabItems.slice(pStart, pStart + P_SIZE).map((g, i) => `<li class="prow" data-id="${g.id}"><button class="handle" data-handle data-id="${g.id}" aria-label="拖曳或用上下鍵調整 ${esc(g.name || g.title)} 的順序">⋮⋮</button><button class="card${g.first ? " isfirst" : ""}${fresh.has(g.id) ? " fresh" : ""}${nx && nx.id === g.id ? " isnext" : ""}" data-act="intro" data-id="${g.id}"><span class="ord">${pStart + i + 1}</span><span class="line"><small>${esc(g.title)}</small>${esc(g.name)}</span><span class="meta">${nx && nx.id === g.id ? `<span class="nexttag">下一位</span>` : ""}${g.first ? `<span class="first">第一優先</span>` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span>` : ""}${catPill(g.cat)}${fmt(g.arrivedAt)} 到場</span></button></li>`).join("")
       : `<li class="empty">${!loaded ? "讀取中…" : otherPend.length ? `「${esc(stageTab)}」目前沒有待介紹；其他頁簽：${otherPend.join("、")}。` : "目前沒有待介紹的來賓。接待老師報到後會即時出現在這裡。"}</li>`;
     $("#pendPager").innerHTML = pager("p", pPage, pPages, tabItems.length, tabItems.slice(0, pStart).some(g => g.first));
   }
@@ -166,9 +207,85 @@ function render() {
   $("#countLine").textContent = total ? `共 ${total} 位・已報到 ${arr} 位` : "";
   const all = [...guests].sort((a, b) => catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
   $("#allList").innerHTML = all.length ? all.map(g => `<li><span>${catPill(g.cat)} ${esc(who(g))}${g.status === "review" ? ` <span class="self">待確認</span>` : g.status !== "expected" ? ` <span class="hint">已報到</span>` : ""}</span>${isAdmin ? `<span data-delbox="${g.id}"><button class="btn sm danger" data-act="askdel" data-id="${g.id}">刪除</button></span>` : ""}</li>`).join("") : `<li class="empty" style="background:none">名單是空的</li>`;
-  if (!$("#clearBox").dataset.asking) $("#clearBox").innerHTML = isAdmin && total ? `<button class="btn sm danger" data-act="askclear">清空全部名單（換下一場活動時用）</button>` : "";
+  // 清空只在還沒有人報到時開放（例如匯入錯檔）；活動結束請用「結案封存」
+  const canClear = isAdmin && total && !guests.some(g => g.status === "arrived" || g.status === "introduced");
+  if (!$("#clearBox").dataset.asking) $("#clearBox").innerHTML = canClear ? `<button class="btn sm danger" data-act="askclear">清空名單（還沒有人報到時才能用）</button>` : isAdmin && total ? `<span class="hint">已有來賓報到；活動結束請用上方「結案封存」，紀錄會保留下來。</span>` : "";
   renderStaff();
+  renderArchives();
   drawQRs();
+}
+
+// ---------- 接待：搜尋結果 ----------
+function renderSearch(q, qRaw) {
+  const hit = g => nameKey(g.name).includes(q) || nameKey(g.title).includes(q) || nameKey((g.title || "") + (g.name || "")).includes(q);
+  const ST_RANK = { expected: 0, arrived: 1, introduced: 2 };
+  const list = guests.filter(g => g.status !== "review" && hit(g))
+    .sort((a, b) => (ST_RANK[a.status] ?? 3) - (ST_RANK[b.status] ?? 3) || catRank(a.cat) - catRank(b.cat) || (a.title || "").localeCompare(b.title || "", "zh-Hant"));
+  const nameCnt = {}; list.forEach(g => { const k = nameKey(g.name); if (k) nameCnt[k] = (nameCnt[k] || 0) + 1; });
+  const stTag = g => g.status === "expected" ? `<span class="stt no">未報到</span>` : g.status === "arrived" ? `<span class="stt yes">已報到 ${fmt(g.arrivedAt)}</span>` : `<span class="stt yes">已報到・已介紹</span>`;
+  const row = g => {
+    const same = nameCnt[nameKey(g.name)] > 1;
+    const btns = g.status === "expected" ? `<div class="btnrow"><button class="btn sm" data-act="arrive" data-id="${g.id}" data-first="0">報到</button><button class="btn sm koi" data-act="arrive" data-id="${g.id}" data-first="1">第一優先</button></div>`
+      : g.status === "arrived" && !g.first ? `<div class="btnrow"><button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">改為第一優先</button></div>` : "";
+    return `<li class="g${g.status === "expected" ? "" : " isdone"}${same ? " same" : ""}"><div class="info">${stTag(g)} ${catPill(g.cat)} <span class="nm">${esc(g.name)}</span>${same ? ` <span class="samenm">同名，請核對頭銜</span>` : ""}<div class="tt">${esc(g.title) || "（未填頭銜）"}</div></div>${btns}</li>`;
+  };
+  $("#expList").innerHTML = list.length
+    ? list.slice(0, 40).map(row).join("") + (list.length > 40 ? `<li class="empty">還有 ${list.length - 40} 位，請多打幾個字縮小範圍</li>` : "")
+    : `<li class="empty">${!loaded ? "讀取中…" : `找不到「${esc(qRaw)}」。<button class="linkbtn" type="button" data-act="walkfill">用臨時來賓通報「${esc(qRaw)}」</button>`}</li>`;
+}
+
+// ---------- 接待：尚未送達橫幅 ----------
+function renderDeliv() {
+  const slow = guests.filter(g => g._pending && delivState(g) === "slow");
+  const bar = $("#delivBar"); bar.hidden = !slow.length;
+  if (slow.length) bar.innerHTML = `<b>⚠ 有 ${slow.length} 筆通報尚未送達介紹台</b><span>${slow.slice(0, 4).map(g => esc(who(g))).join("、")}${slow.length > 4 ? " 等" : ""}</span><span class="hint">資料已存在這台手機，網路恢復後會自動補送。請不要關閉或重新整理這個頁面，也不必重複報到；急的話請口頭通知司儀。</span>`;
+}
+
+// ---------- 介紹台：下一位 ----------
+// 規則：跟著佇列第一位走；只有「新到的第一優先」不會直接把正在念的人換掉，而是跳出提示讓司儀決定
+function pickNext(list) {
+  const lock = (g, pin) => { nextId = g.id; pinned = !!pin; knownFirst = new Set(list.filter(x => x.first).map(x => x.id)); firstAlertId = null; return g; };
+  // 撤銷或按「改為下一位」指定的人：固定在下一位，直到他被介紹
+  if (forceNext) { const f = list.find(g => g.id === forceNext); if (f) { forceNext = null; return lock(f, true); } }
+  const desired = list[0] || null;
+  if (!desired) { nextId = null; pinned = false; firstAlertId = null; return null; }
+  const cur = nextId ? list.find(g => g.id === nextId) : null;
+  if (!cur) return lock(desired);
+  if (pinned) { firstAlertId = desired.id !== cur.id && desired.first && !knownFirst.has(desired.id) && !dismissed.has(desired.id) ? desired.id : null; return cur; }
+  if (desired.id === cur.id) { firstAlertId = null; return cur; }
+  if (desired.first && !knownFirst.has(desired.id)) { firstAlertId = dismissed.has(desired.id) ? null : desired.id; return cur; }
+  return lock(desired);
+}
+function renderNext(nx, list) {
+  const box = $("#nextBox");
+  if (!nx) box.innerHTML = `<div class="nb-lbl">下一位</div><div class="nb-empty">${loaded ? "目前沒有待介紹的來賓" : "讀取中…"}</div>`;
+  else {
+    const after = list.filter(g => g.id !== nx.id).slice(0, 2);
+    box.innerHTML = `<div class="nb-lbl">下一位 ${nx.first ? `<span class="first">第一優先</span>` : ""}${catPill(nx.cat)}<span class="hint">${fmt(nx.arrivedAt)} 到場</span></div>
+      <div class="nb-title">${esc(nx.title) || "&nbsp;"}</div>
+      <div class="nb-name">${esc(nx.name)}</div>
+      <div class="nb-foot"><button class="btn big ok" type="button" data-act="intro" data-id="${nx.id}">✓ 介紹完畢</button>${after.length ? `<span class="nb-after">接著：${after.map(g => esc(who(g))).join("、")}</span>` : ""}</div>`;
+  }
+  const al = $("#firstAlert"), fg = firstAlertId && list.find(g => g.id === firstAlertId);
+  al.hidden = !fg;
+  if (fg) al.innerHTML = `<div><b>第一優先來賓到場：</b><span class="fa-who">${esc(who(fg))}</span><div class="hint">已排在佇列最前面；念完目前這位就會輪到，或現在切換。</div></div><div class="btnrow"><button class="btn koi" type="button" data-act="takefirst" data-id="${fg.id}">改為下一位</button><button class="btn ghost" type="button" data-act="laterfirst" data-id="${fg.id}">念完這位再說</button></div>`;
+  const ub = $("#undoBar"), live = undoInfo && Date.now() < undoInfo.until;
+  ub.hidden = !live;
+  if (live) ub.innerHTML = `<span>已介紹：<b>${esc(undoInfo.label)}</b></span><button class="btn sm" type="button" data-act="undointro" data-id="${undoInfo.id}">↩ 撤銷</button>`;
+}
+
+// ---------- 活動紀錄 ----------
+function renderArchives() {
+  $("#askClose").hidden = !isAdmin;
+  const box = $("#archList");
+  if (archErr) { box.innerHTML = `<li class="empty">${esc(archErr)}</li>`; return; }
+  box.innerHTML = archives.length ? archives.map(a => {
+    const ask = archAsk && archAsk.id === a.id ? archAsk.act : "";
+    const btns = ask === "restore" ? `<span class="confirm">切換回這場？${a.count} 位來賓會放回目前名單，活動名稱改為「${esc(a.event)}」。<button class="btn sm koi" data-act="archrestore" data-id="${a.id}">確定切換</button><button class="btn sm ghost" data-act="archno">取消</button></span>`
+      : ask === "del" ? `<span class="confirm">永久刪除這份紀錄？無法復原。<button class="btn sm danger" data-act="archdel" data-id="${a.id}">刪除</button><button class="btn sm ghost" data-act="archno">取消</button></span>`
+      : `<button class="btn sm ghost" data-act="archcsv" data-id="${a.id}">匯出 CSV</button>${isAdmin ? `<button class="btn sm ghost" data-act="archaskrestore" data-id="${a.id}">切換回這場</button>` : ""}${isOwner ? `<button class="btn sm danger" data-act="archaskdel" data-id="${a.id}">刪除</button>` : ""}`;
+    return `<li class="g"><div class="info"><span class="nm">${esc(a.event)}</span><div class="tt">${fullTime(a.closedAt)} 結案・共 ${a.count} 位・已報到 ${a.arrived}・已介紹 ${a.introduced}${a.closedBy ? "・" + esc(a.closedBy) : ""}</div></div><div class="btnrow">${btns}</div></li>`;
+  }).join("") : `<li class="empty">還沒有結案的活動。</li>`;
 }
 
 function pager(k, pg, pages, total, firstBefore) {
@@ -187,10 +304,14 @@ function renderStaff() {
 
 // ---------- 資料寫入 ----------
 const gref = id => doc(db, "guests", id);
-async function setGuest(id, patch, msg) {
-  try { await updateDoc(gref(id), patch); if (msg) toast(msg); }
-  catch (e) { toast(e && e.code === "permission-denied" ? "沒有權限，請請管理者把你加入工作人員" : "更新失敗，請再試一次"); }
+// 寫入先套用到畫面，不等伺服器（離線時 Promise 會一直等）；送達與否由 hasPendingWrites 顯示
+function setGuest(id, patch, msg) {
+  const p = updateDoc(gref(id), patch);
+  if (msg) toast(msg);
+  return p.catch(e => { ackWatch.delete(id); toast(e && e.code === "permission-denied" ? "沒有權限，請請管理者把你加入工作人員" : "更新失敗，請再試一次"); });
 }
+// 報到類的寫入：等伺服器確認後跳出「已送達介紹台」
+function watchAck(id, label) { ackWatch.set(id, label); }
 async function batchWrite(ops) { // ops: [{type:"set"|"update"|"delete", id, data}]
   for (let i = 0; i < ops.length; i += 400) {
     const b = writeBatch(db);
@@ -204,16 +325,34 @@ document.addEventListener("click", async e => {
   const id = b.dataset.id, act = b.dataset.act, g = guests.find(x => x.id === id);
   if (act === "closescan") { scanId = null; history.replaceState(null, "", "#reception"); render(); return; }
   if (act === "pg") { const to = +b.dataset.to; if (b.dataset.k === "p") pPage = to; else dPage = to; render(); b.closest(".zone").scrollIntoView({ block: "start", behavior: "smooth" }); return; }
-  if (act === "arrive" && g) { b.disabled = true; const f = b.dataset.first === "1"; await setGuest(id, { status: "arrived", rank: null, first: f, arrivedAt: Date.now(), reporterName: me.displayName || me.email }, `${g.name || g.title} 已報到${f ? "（第一優先）" : ""}`); return; }
-  if (act === "setfirst") { await setGuest(id, { first: true, rank: null }, "已設為第一優先"); return; }
-  if (act === "unfirst") { await setGuest(id, { first: false, rank: null }, "已取消優先"); return; }
-  if (act === "intro") { await setGuest(id, { status: "introduced", introducedAt: Date.now() }); return; }
-  if (act === "back") { b.disabled = true; await setGuest(id, { status: "arrived", rank: null, introducedAt: null }, `${g ? g.name || g.title : ""} 已送回待介紹`); return; }
+  if (act === "arrive" && g) { b.disabled = true; const f = b.dataset.first === "1"; watchAck(id, who(g)); setGuest(id, { status: "arrived", rank: null, first: f, arrivedAt: Date.now(), reporterName: me.displayName || me.email }, `${g.name || g.title} 報到傳送中…`); return; }
+  if (act === "setfirst") { setGuest(id, { first: true, rank: null }, "已設為第一優先"); return; }
+  if (act === "unfirst") { setGuest(id, { first: false, rank: null }, "已取消優先"); return; }
+  if (act === "intro" && g) {
+    b.disabled = true;
+    undoInfo = { id, label: who(g), until: Date.now() + 10000 };
+    setTimeout(() => { if (undoInfo && undoInfo.id === id && Date.now() >= undoInfo.until) { undoInfo = null; render(); } }, 10100);
+    setGuest(id, { status: "introduced", introducedAt: Date.now() }); return;
+  }
+  if (act === "undointro") { undoInfo = null; forceNext = id; setGuest(id, { status: "arrived", introducedAt: null }, `${g ? who(g) : ""} 已回到下一位`); render(); return; }
+  if (act === "takefirst") { forceNext = id; firstAlertId = null; render(); return; }
+  if (act === "laterfirst") { dismissed.add(id); firstAlertId = null; render(); return; }
+  if (act === "walkfill") { $("#w-name").value = $("#q").value.trim(); $("#q").value = ""; render(); $("#walkForm").scrollIntoView({ block: "start", behavior: "smooth" }); $("#w-title").focus({ preventScroll: true }); return; }
+  if (act === "back") { b.disabled = true; setGuest(id, { status: "arrived", rank: null, introducedAt: null }, `${g ? g.name || g.title : ""} 已送回待介紹`); return; }
   if (act === "undo" && g) {
     if (g.source === "walkin" || g.source === "self") { try { await deleteDoc(gref(id)); toast("已撤回"); } catch (err) { toast("撤回失敗"); } }
-    else await setGuest(id, { status: "expected", first: false, rank: null, arrivedAt: null, reporterName: null, selfReported: false }, "已撤回，回到預約名單");
+    else setGuest(id, { status: "expected", first: false, rank: null, arrivedAt: null, reporterName: null, selfReported: false }, "已撤回，回到預約名單");
+    ackWatch.delete(id);
     return;
   }
+  if (act === "archcsv") { exportArchive(id, b); return; }
+  if (act === "archaskrestore" || act === "archaskdel") {
+    if (act === "archaskrestore" && guests.length) { toast("目前名單還有資料：請先「結案封存」目前這場，才能切換到另一場"); return; }
+    archAsk = { id, act: act === "archaskrestore" ? "restore" : "del" }; renderArchives(); return;
+  }
+  if (act === "archno") { archAsk = null; renderArchives(); return; }
+  if (act === "archrestore") { b.disabled = true; await restoreArchive(id); archAsk = null; renderArchives(); return; }
+  if (act === "archdel") { b.disabled = true; await deleteArchive(id); archAsk = null; renderArchives(); return; }
   if (act === "askdel") { document.querySelector(`[data-delbox="${id}"]`).innerHTML = `<span class="confirm">確定？<button class="btn sm danger" data-act="del" data-id="${id}">刪除</button><button class="btn sm ghost" data-act="nodel">取消</button></span>`; return; }
   if (act === "nodel") { render(); return; }
   if (act === "del") { try { await deleteDoc(gref(id)); toast("已刪除"); } catch (err) { toast("刪除失敗"); } return; }
@@ -279,13 +418,21 @@ $("#walkForm").addEventListener("submit", async e => {
   e.preventDefault(); const err = $("#walkErr"); err.hidden = true;
   const title = $("#w-title").value.trim(), name = $("#w-name").value.trim();
   if (!name && !title) { err.textContent = "請至少填姓名或頭銜。"; err.hidden = false; $("#w-name").focus(); return; }
-  const cat = (document.querySelector("input[name=wcat]:checked") || {}).value || CATS[1], now = Date.now();
-  try {
-    await setDoc(gref(newId()), { title, name, cat, first: walkFirst === "1", status: "arrived", arrivedAt: now, createdAt: now, source: "walkin", reporterName: me.displayName || me.email });
-    toast(`${name || title} 已報到${walkFirst === "1" ? "（第一優先）" : ""}`);
-    $("#w-title").value = ""; $("#w-name").value = ""; $("#w-title").focus();
-  } catch (ex) { err.textContent = ex && ex.code === "permission-denied" ? "沒有權限，請請管理者把你加入工作人員。" : "送出失敗，請再試一次。"; err.hidden = false; }
+  const cat = (document.querySelector("input[name=wcat]:checked") || {}).value || CATS[1], now = Date.now(), id = newId(), first = walkFirst === "1";
+  // 先存到這台裝置並顯示在「剛剛通報」（傳送中），不等伺服器；失敗時把資料填回表單
+  watchAck(id, `${title ? title + " " : ""}${name}`.trim());
+  setDoc(gref(id), { title, name, cat, first, status: "arrived", arrivedAt: now, createdAt: now, source: "walkin", reporterName: me.displayName || me.email })
+    .catch(ex => {
+      ackWatch.delete(id);
+      if (!$("#w-title").value && !$("#w-name").value) { $("#w-title").value = title; $("#w-name").value = name; }
+      err.textContent = `「${name || title}」沒有送出：` + (ex && ex.code === "permission-denied" ? "沒有權限，請請管理者把你加入工作人員。" : "請再按一次報到。");
+      err.hidden = false;
+    });
+  toast(`${name || title} 報到傳送中…${first ? "（第一優先）" : ""}`);
+  $("#w-title").value = ""; $("#w-name").value = ""; $("#w-title").focus();
 });
+$("#goWalk").addEventListener("click", () => { $("#walkForm").scrollIntoView({ block: "start", behavior: "smooth" }); $("#w-title").focus({ preventScroll: true }); });
+$("#goReview").addEventListener("click", () => $("#reviewPanel").scrollIntoView({ block: "start", behavior: "smooth" }));
 
 // ---------- 手動貼上 ----------
 function parseLine(l) {
@@ -576,6 +723,86 @@ $("#requestBtn").addEventListener("click", async () => {
   b.disabled = false;
 });
 
+// ---------- 活動結案、切換與 CSV 匯出 ----------
+// archives/{id}：摘要（活動名稱、結案時間、人數）；archives/{id}/rows/all：完整名單（含 QR 用的原始 id）
+const fullTime = ms => { if (!ms) return ""; const d = new Date(ms); return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const ST_LABEL = { expected: "未報到", review: "自助待確認", arrived: "已報到（待介紹）", introduced: "已介紹" };
+const SRC_LABEL = { preload: "手動貼上", import: "匯入名單", walkin: "臨時來賓", self: "自助報到" };
+const ARCH_FIELDS = ["title", "name", "cat", "status", "source", "first", "arrivedAt", "introducedAt", "reporterName", "selfReported", "createdAt", "rank"];
+function rowOf(g) { const r = { id: g.id }; ARCH_FIELDS.forEach(k => r[k] = g[k] === undefined ? null : g[k]); r.first = !!g.first; r.selfReported = !!g.selfReported; return r; }
+function csvCell(v) {
+  let s = String(v ?? "");
+  if (/^[=+\-@]/.test(s)) s = "'" + s;              // 避免 Excel 當成公式
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function downloadCsv(list, eventName) {
+  const rows = [...list].sort((a, b) => catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
+  const head = ["頭銜", "姓名", "身分", "狀態", "第一優先", "來源", "報到時間", "介紹時間", "通報人"];
+  const body = rows.map(g => [g.title, g.name, g.cat, ST_LABEL[g.status] || g.status, g.first ? "是" : "", (SRC_LABEL[g.source] || g.source || "") + (g.selfReported && g.source !== "self" ? "（自助報到）" : ""), fullTime(g.arrivedAt), fullTime(g.introducedAt), g.reporterName || ""]);
+  const csv = [head, ...body].map(r => r.map(csvCell).join(",")).join("\r\n");
+  const d = new Date(), stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  saveBlob(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), `${String(eventName || "活動").replace(/[\\/:*?"<>|]/g, "_")}_來賓紀錄_${stamp}.csv`);
+}
+$("#csvNow").addEventListener("click", () => {
+  if (!guests.length) { toast("目前名單是空的"); return; }
+  downloadCsv(guests, cfg.event || SCHOOL.defaultEvent); toast("已下載 CSV，可用 Excel 開啟");
+});
+async function exportArchive(id, b) {
+  const a = archives.find(x => x.id === id); b.disabled = true;
+  try { const s = await getDoc(doc(db, "archives", id, "rows", "all")); downloadCsv((s.exists() && s.data().guests) || [], a ? a.event : "活動"); toast("已下載 CSV，可用 Excel 開啟"); }
+  catch (e) { toast("下載失敗，請確認網路後再試"); }
+  b.disabled = false;
+}
+
+$("#askClose").addEventListener("click", () => {
+  if (!guests.length) { toast("目前名單是空的，不需要結案"); return; }
+  const arr = guests.filter(g => g.status === "arrived" || g.status === "introduced").length, intro = guests.filter(g => g.status === "introduced").length;
+  const pend = guests.filter(g => g.status === "arrived").length, rv = guests.filter(g => g.status === "review").length;
+  $("#closeSum").innerHTML = `將「<b>${esc(cfg.event || SCHOOL.defaultEvent)}</b>」共 ${guests.length} 位（已報到 ${arr}、已介紹 ${intro}）封存起來，然後清空目前名單。${pend ? `<br><b class="warnt">還有 ${pend} 位已報到但尚未介紹。</b>` : ""}${rv ? `<br><b class="warnt">還有 ${rv} 筆自助報到尚未確認。</b>` : ""}<br><span class="hint">封存後可以隨時匯出 CSV，也能在下方「切換回這場」繼續使用；印好的 QR Code 切換回來後仍可使用。</span>`;
+  $("#closeErr").hidden = true; $("#nextEvent").value = ""; $("#closeBox").hidden = false; $("#nextEvent").focus();
+});
+$("#noClose").addEventListener("click", () => { $("#closeBox").hidden = true; });
+$("#doClose").addEventListener("click", async () => {
+  const err = $("#closeErr"), b = $("#doClose"); err.hidden = true;
+  if (!conn.online || navigator.onLine === false) { err.textContent = "目前離線，請連上網路後再結案。"; err.hidden = false; return; }
+  if (guests.some(g => g._pending)) { err.textContent = "還有通報尚未送達伺服器，請等「傳送中」消失後再結案。"; err.hidden = false; return; }
+  const ev = cfg.event || SCHOOL.defaultEvent, next = $("#nextEvent").value.trim(), now = Date.now(), id = newId();
+  const rows = guests.map(rowOf);
+  if (JSON.stringify(rows).length > 900000) { err.textContent = "名單太大，無法一次封存，請先匯出 CSV 保存。"; err.hidden = false; return; }
+  b.disabled = true;
+  try {
+    const bt = writeBatch(db);
+    bt.set(doc(db, "archives", id), { event: ev, closedAt: now, closedBy: me.displayName || me.email, count: rows.length, arrived: rows.filter(g => g.status === "arrived" || g.status === "introduced").length, introduced: rows.filter(g => g.status === "introduced").length });
+    bt.set(doc(db, "archives", id, "rows", "all"), { guests: rows });
+    await bt.commit();                                       // 先確定封存成功，才清空名單
+  } catch (e) {
+    err.textContent = e && e.code === "permission-denied" ? "封存失敗：沒有權限。請確認你是管理者，且 Firebase 安全規則已更新成新版（見 README）。" : "封存失敗，名單沒有被清空，請再試一次。";
+    err.hidden = false; b.disabled = false; return;
+  }
+  try {
+    await batchWrite(rows.map(g => ({ type: "delete", id: g.id })));
+    await setDoc(doc(db, "settings", "event"), { event: next || ev, notice: "" });
+    $("#closeBox").hidden = true; toast(`「${ev}」已結案封存${next ? `，目前活動：${next}` : ""}`);
+  } catch (e) { err.textContent = "已封存，但清空名單時中斷；請再按一次「結案封存」或用「清空名單」。"; err.hidden = false; }
+  b.disabled = false;
+});
+
+async function restoreArchive(id) {
+  const a = archives.find(x => x.id === id); if (!a) return;
+  if (guests.length) { toast("目前名單還有資料：請先「結案封存」目前這場"); return; }
+  try {
+    const s = await getDoc(doc(db, "archives", id, "rows", "all"));
+    const rows = (s.exists() && s.data().guests) || [];
+    await batchWrite(rows.map(r => { const { id: gid, ...data } = r; return { type: "set", id: gid || newId(), data }; }));
+    await setDoc(doc(db, "settings", "event"), { event: a.event, notice: cfg.notice || "" });
+    toast(`已切換回「${a.event}」，共 ${rows.length} 位`);
+  } catch (e) { toast(e && e.code === "permission-denied" ? "切換失敗：需要管理者權限" : "切換失敗，請再試一次"); }
+}
+async function deleteArchive(id) {
+  try { const bt = writeBatch(db); bt.delete(doc(db, "archives", id, "rows", "all")); bt.delete(doc(db, "archives", id)); await bt.commit(); toast("已刪除這份紀錄"); }
+  catch (e) { toast("刪除失敗：只有系統管理者能刪除活動紀錄"); }
+}
+
 // ---------- 提示音 ----------
 let chimeCtx = null;
 $("#chime").addEventListener("change", e => { if (e.target.checked) { try { chimeCtx = chimeCtx || new (window.AudioContext || window.webkitAudioContext)(); chimeCtx.resume(); ding(false); } catch (err) {} } });
@@ -592,7 +819,6 @@ function ding(urgent) {
 // ---------- 自助報到待確認 ----------
 // 來賓自己掃 QR 填的資料先停在「待確認」，老師可修改後確認；
 // 若姓名與預約名單中唯一一位相同，確認時合併成同一筆
-const nameKey = s => (s || "").replace(/\s/g, "");
 function matchOf(g, name) {
   const nm = nameKey(name ?? g.name); if (!nm) return null;
   const c = guests.filter(x => x.status === "expected" && nameKey(x.name) === nm);
@@ -602,6 +828,7 @@ function renderReview() {
   const list = guests.filter(g => g.status === "review").sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const rb = $("#reviewBadge"); rb.hidden = !list.length; rb.textContent = list.length;
   $("#reviewPanel").hidden = !list.length;
+  $("#goReview").hidden = !list.length; $("#rvCount").textContent = list.length;
   const key = list.map(g => g.id).join(",") + "|" + guests.filter(g => g.status === "expected").length;
   const box = $("#reviewList");
   if (key === reviewKey || box.contains(document.activeElement)) return; // 老師正在修改時不要重畫
@@ -637,19 +864,32 @@ async function confirmSelf(id, first) {
       }
       tx.update(gref(id), { title, name, cat, first, status: "arrived", rank: null, reporterName: "自助報到・" + by });
     });
-    reviewKey = ""; toast(`${name || title} 已確認${first ? "（第一優先）" : ""}`);
-  } catch (e) { toast(e && e.message === "gone" ? "這筆已被其他老師處理" : "確認失敗，請再試一次"); reviewKey = ""; render(); }
+    reviewKey = ""; toast(`✓ ${name || title} 已確認，已送達介紹台${first ? "（第一優先）" : ""}`);
+  } catch (e) { toast(e && e.message === "gone" ? "這筆已被其他老師處理" : e && e.code === "unavailable" ? "網路不穩，這筆沒有送出，請連上網路後再按一次" : "確認失敗，請再試一次"); reviewKey = ""; render(); }
 }
 
 // ---------- 登入與資料連線 ----------
-function stopListeners() { unsubs.forEach(u => u()); unsubs = []; guests = []; requests = []; loaded = false; prevStatus = new Map(); }
+function stopListeners() { unsubs.forEach(u => u()); unsubs = []; guests = []; requests = []; archives = []; loaded = false; prevStatus = new Map(); pendSince = new Map(); ackWatch = new Map(); conn = { online: false, syncedAt: 0, updatedAt: 0, offlineSince: 0, startedAt: 0 }; }
 
 function startListeners() {
-  setStatus("連線中…");
-  const timer = setTimeout(() => setStatus("資料暫時連不上，畫面可能不是最新。", true), 10000);
-  unsubs.push(onSnapshot(query(collection(db, "guests"), orderBy("createdAt", "asc"), limit(2000)), snap => {
-    clearTimeout(timer); setStatus(snap.metadata.fromCache ? "離線中，畫面可能不是最新" : "即時連線中・自動更新", snap.metadata.fromCache);
-    guests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  connErr = ""; conn.startedAt = Date.now(); renderConn();
+  const timer = setTimeout(renderConn, 10500);
+  // includeMetadataChanges：伺服器確認寫入、或連線斷開／恢復時也會通知
+  unsubs.push(onSnapshot(query(collection(db, "guests"), orderBy("createdAt", "asc"), limit(2000)), { includeMetadataChanges: true }, snap => {
+    clearTimeout(timer); connErr = "";
+    const now = Date.now();
+    if (snap.metadata.fromCache) { if (conn.online) conn.offlineSince = now; conn.online = false; }
+    else { conn.online = true; conn.offlineSince = 0; conn.syncedAt = now; if (snap.docChanges().length || !conn.updatedAt) conn.updatedAt = now; }
+    guests = snap.docs.map(d => ({ id: d.id, ...d.data(), _pending: d.metadata.hasPendingWrites }));
+    // 送達追蹤
+    const byId = new Map(guests.map(g => [g.id, g]));
+    for (const g of guests) { if (g._pending && !pendSince.has(g.id)) pendSince.set(g.id, now); }
+    for (const id of [...pendSince.keys()]) { const g = byId.get(id); if (!g || !g._pending) pendSince.delete(id); }
+    for (const [id, label] of [...ackWatch]) {
+      const g = byId.get(id);
+      if (g && !g._pending && g.status === "arrived") { ackWatch.delete(id); toast(`✓ ${label || who(g)} 已送達介紹台`); }
+      else if (!g || (g.status !== "arrived" && !g._pending)) ackWatch.delete(id);
+    }
     if (loaded) {
       let n = false, urgent = null;
       for (const g of guests) {
@@ -659,14 +899,17 @@ function startListeners() {
           const id = g.id; setTimeout(() => { fresh.delete(id); render(); }, 6000);
         }
       }
-      if (urgent) { stageTab = grpOf(urgent); pPage = 0; }
+      // 第一優先不再自動切換頁簽，改由介紹台上方的提示讓司儀決定
       const newReview = guests.some(g => g.status === "review" && prevStatus.get(g.id) === undefined);
       if (newReview) toast("有新的自助報到等待確認");
       if (n || newReview) ding(!!urgent);
     }
     prevStatus = new Map(guests.map(g => [g.id, g.status])); loaded = true;
     render();
-  }, e => { clearTimeout(timer); setStatus(e.code === "permission-denied" ? "你的帳號沒有權限讀取名單。" : "連線中斷，請重新整理頁面。", true); }));
+  }, e => { clearTimeout(timer); setStatus(e.code === "permission-denied" ? "你的帳號沒有權限讀取名單。" : "連線中斷，請重新整理頁面。"); }));
+  unsubs.push(onSnapshot(query(collection(db, "archives"), orderBy("closedAt", "desc"), limit(50)), snap => {
+    archErr = ""; archives = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderArchives();
+  }, e => { archErr = e.code === "permission-denied" ? "讀不到活動紀錄：需要先把 Firebase 安全規則更新成新版（見 README「更新安全規則」）。" : "活動紀錄暫時讀不到。"; renderArchives(); }));
   unsubs.push(onSnapshot(doc(db, "settings", "staff"), s => {
     if (s.exists()) { staffDoc = s.data(); applyRole(roleOf(staffDoc)); }
     render();
