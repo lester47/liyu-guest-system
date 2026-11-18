@@ -1,6 +1,7 @@
 // 鯉魚國小來賓通報系統：工作人員端（接待報到／介紹台／名單與 QR）
 import {
   configured, auth, db, googleLogin, onAuthStateChanged, signOut,
+  signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification,
   collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit,
   writeBatch, runTransaction
 } from "./firebase.js";
@@ -15,9 +16,10 @@ const catPill = c => `<span class="cat${c === CATS[0] ? " c0" : ""}">${esc(c)}</
 const P_SIZE = 8, D_SIZE = 15;
 
 // ---------- 狀態 ----------
-let me = null, isStaff = false, isAdmin = false, staffDoc = { admins: [], emails: [] };
+let me = null, isStaff = false, isAdmin = false, isOwner = false, staffDoc = { owner: "", admins: [], emails: [] };
+const ROLE_NAME = { owner: "系統管理者", admin: "管理者", staff: "工作人員" };
 let guests = [], cfg = { event: "", notice: "" }, loaded = false;
-let prevStatus = new Map(), fresh = new Set(), scanId = null, mergeTried = new Set();
+let prevStatus = new Map(), fresh = new Set(), scanId = null, reviewKey = "";
 let expTab = CATS[0], stageTab = CATS[0], pPage = 0, dPage = 0;
 let curPending = [], curTabIds = [], drag = null, unsubs = [];
 try { const t = localStorage.getItem("liyu-exp-tab"); if (CATS.includes(t)) expTab = t; } catch (e) {}
@@ -97,6 +99,7 @@ function render() {
   const pendingAll = orderPending(guests.filter(g => g.status === "arrived"));
   const done = guests.filter(g => g.status === "introduced").sort((a, b) => (b.introducedAt || 0) - (a.introducedAt || 0));
   const b = $("#pendBadge"); b.hidden = !pendingAll.length; b.textContent = pendingAll.length;
+  renderReview();
 
   // 掃描卡
   const sc = $("#scanCard");
@@ -122,7 +125,7 @@ function render() {
     : `<li class="empty">${!loaded ? "讀取中…" : others.length ? `這個頁簽沒有${q ? "符合的" : "待報到的"}來賓；其他頁簽：${others.join("、")}。` : q ? "沒有符合的預約來賓，可以用下方「臨時來賓」通報。" : guests.length ? "預約來賓都已報到。" : "還沒有預約名單。到「名單與 QR」匯入，或直接用臨時來賓通報。"}</li>`;
 
   // 剛剛通報
-  const recent = guests.filter(g => g.status !== "expected").sort((a, b) => (b.arrivedAt || 0) - (a.arrivedAt || 0)).slice(0, 8);
+  const recent = guests.filter(g => g.status === "arrived" || g.status === "introduced").sort((a, b) => (b.arrivedAt || 0) - (a.arrivedAt || 0)).slice(0, 8);
   $("#recentList").innerHTML = recent.length ? recent.map(g => `<li class="g"><div class="info">${g.first ? `<span class="first">第一優先</span> ` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span> ` : ""}<span class="nm">${esc(who(g))}</span><div class="tt">${fmt(g.arrivedAt)} 報到${g.status === "introduced" ? "・已介紹" : ""}${g.reporterName ? "・" + esc(g.reporterName) : ""}</div></div>${g.status === "introduced" ? "" : `<div class="btnrow">${g.first ? `<button class="btn sm ghost" data-act="unfirst" data-id="${g.id}">取消優先</button>` : `<button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">設第一優先</button>`}<button class="btn sm danger" data-act="undo" data-id="${g.id}">撤回</button></div>`}</li>`).join("") : `<li class="empty">還沒有人報到。</li>`;
 
   // 介紹台（四頁簽）
@@ -153,10 +156,12 @@ function render() {
 
   // 名單與 QR
   $("#cfgPanel").hidden = !isAdmin; $("#staffPanel").hidden = !isAdmin;
-  const total = guests.length, arr = guests.filter(g => g.status !== "expected").length;
+  document.querySelectorAll(".admin-only").forEach(el => el.hidden = !isAdmin);
+  document.querySelector(".admin-note").hidden = isAdmin;
+  const total = guests.length, arr = guests.filter(g => g.status === "arrived" || g.status === "introduced").length;
   $("#countLine").textContent = total ? `共 ${total} 位・已報到 ${arr} 位` : "";
   const all = [...guests].sort((a, b) => catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
-  $("#allList").innerHTML = all.length ? all.map(g => `<li><span>${catPill(g.cat)} ${esc(who(g))}${g.status !== "expected" ? ` <span class="hint">已報到</span>` : ""}</span><span data-delbox="${g.id}"><button class="btn sm danger" data-act="askdel" data-id="${g.id}">刪除</button></span></li>`).join("") : `<li class="empty" style="background:none">名單是空的</li>`;
+  $("#allList").innerHTML = all.length ? all.map(g => `<li><span>${catPill(g.cat)} ${esc(who(g))}${g.status === "review" ? ` <span class="self">待確認</span>` : g.status !== "expected" ? ` <span class="hint">已報到</span>` : ""}</span>${isAdmin ? `<span data-delbox="${g.id}"><button class="btn sm danger" data-act="askdel" data-id="${g.id}">刪除</button></span>` : ""}</li>`).join("") : `<li class="empty" style="background:none">名單是空的</li>`;
   if (!$("#clearBox").dataset.asking) $("#clearBox").innerHTML = isAdmin && total ? `<button class="btn sm danger" data-act="askclear">清空全部名單（換下一場活動時用）</button>` : "";
   renderStaff();
   drawQRs();
@@ -169,9 +174,11 @@ function pager(k, pg, pages, total, firstBefore) {
 
 function renderStaff() {
   if (!isAdmin) return;
-  const chip = (e, role) => `<li>${esc(e)}${e === me.email ? " <b>（你）</b>" : ""}${e === me.email && role === "admins" ? "" : `<button type="button" data-act="rmstaff" data-role="${role}" data-email="${esc(e)}" aria-label="移除 ${esc(e)}">✕</button>`}</li>`;
-  $("#adminList").innerHTML = (staffDoc.admins || []).map(e => chip(e, "admins")).join("") || `<li>尚無</li>`;
-  $("#staffList").innerHTML = (staffDoc.emails || []).map(e => chip(e, "emails")).join("") || `<li class="hint" style="background:none">還沒有加入工作人員</li>`;
+  const chip = (e, role, removable) => `<li>${esc(e)}${e === me.email ? " <b>（你）</b>" : ""}${removable ? `<button type="button" data-act="rmstaff" data-role="${role}" data-email="${esc(e)}" aria-label="移除 ${esc(e)}">✕</button>` : ""}</li>`;
+  $("#ownerList").innerHTML = staffDoc.owner ? chip(staffDoc.owner, "owner", false) : `<li>尚未設定</li>`;
+  $("#adminList").innerHTML = (staffDoc.admins || []).map(e => chip(e, "admins", isOwner)).join("") || `<li class="hint" style="background:none">還沒有加入管理者</li>`;
+  $("#staffList").innerHTML = (staffDoc.emails || []).map(e => chip(e, "emails", true)).join("") || `<li class="hint" style="background:none">還沒有加入工作人員</li>`;
+  $("#addAdmin").hidden = !isOwner;
 }
 
 // ---------- 資料寫入 ----------
@@ -209,6 +216,10 @@ document.addEventListener("click", async e => {
   if (act === "askclear") { const box = $("#clearBox"); box.dataset.asking = "1"; box.innerHTML = `確定清空全部 ${guests.length} 位來賓？無法復原。<button class="btn sm danger" data-act="doclear">清空</button><button class="btn sm ghost" data-act="noclear">取消</button>`; return; }
   if (act === "noclear") { delete $("#clearBox").dataset.asking; render(); return; }
   if (act === "doclear") { b.disabled = true; try { await batchWrite(guests.map(x => ({ type: "delete", id: x.id }))); toast("已清空名單"); } catch (err) { toast("清空失敗，需要管理者權限"); } delete $("#clearBox").dataset.asking; render(); return; }
+  if (act === "rvok") { b.disabled = true; await confirmSelf(id, b.dataset.first === "1"); return; }
+  if (act === "rvask") { document.querySelector(`[data-rvdel="${id}"]`).innerHTML = `<span class="confirm">確定刪除？<button class="btn sm danger" data-act="rvdel" data-id="${id}">刪除</button><button class="btn sm ghost" data-act="rvno">取消</button></span>`; return; }
+  if (act === "rvno") { reviewKey = ""; render(); return; }
+  if (act === "rvdel") { try { await deleteDoc(gref(id)); reviewKey = ""; toast("已刪除"); } catch (err) { toast("刪除失敗"); } return; }
   if (act === "rmstaff") { await saveStaff(b.dataset.role, (staffDoc[b.dataset.role] || []).filter(x => x !== b.dataset.email)); return; }
 });
 
@@ -366,9 +377,12 @@ $("#saveCfg").addEventListener("click", async () => {
   b.disabled = false;
 });
 async function saveStaff(role, list) {
-  const next = { admins: staffDoc.admins || [], emails: staffDoc.emails || [], [role]: [...new Set(list)] };
+  const next = { owner: isOwner ? me.email : (staffDoc.owner || ""), admins: staffDoc.admins || [], emails: staffDoc.emails || [] };
+  next[role] = [...new Set(list)].filter(e => e !== next.owner);
+  if (role === "admins") next.emails = next.emails.filter(e => !next.admins.includes(e));
+  if (role === "emails") next.emails = next.emails.filter(e => !next.admins.includes(e));
   try { await setDoc(doc(db, "settings", "staff"), next); toast("帳號名單已更新"); }
-  catch (e) { toast("更新失敗：管理者不能移除自己"); }
+  catch (e) { toast(role === "admins" ? "只有系統管理者能調整管理者" : "更新失敗，需要管理者權限"); }
 }
 function addEmail(role) {
   const v = $("#newEmail").value.trim().toLowerCase();
@@ -412,23 +426,56 @@ function ding(urgent) {
   });
 }
 
-// ---------- 自助報到自動合併 ----------
-// 來賓自己掃 QR 填的資料，若姓名和預約名單中唯一一位相同，就合併成同一筆
-async function mergeSelf() {
-  for (const s of guests.filter(g => g.source === "self" && g.status === "arrived" && !mergeTried.has(g.id))) {
-    mergeTried.add(s.id);
-    const nm = (s.name || "").replace(/\s/g, ""); if (!nm) continue;
-    const c = guests.filter(g => g.status === "expected" && (g.name || "").replace(/\s/g, "") === nm);
-    if (c.length !== 1) continue;
-    try {
-      await runTransaction(db, async tx => {
-        const sd = await tx.get(gref(s.id)), ed = await tx.get(gref(c[0].id));
-        if (!sd.exists() || !ed.exists() || ed.data().status !== "expected") return;
-        tx.update(gref(c[0].id), { status: "arrived", arrivedAt: sd.data().arrivedAt || Date.now(), first: false, rank: null, selfReported: true, reporterName: "自助報到" });
-        tx.delete(gref(s.id));
-      });
-    } catch (e) { /* 另一台裝置已合併，略過 */ }
-  }
+// ---------- 自助報到待確認 ----------
+// 來賓自己掃 QR 填的資料先停在「待確認」，老師可修改後確認；
+// 若姓名與預約名單中唯一一位相同，確認時合併成同一筆
+const nameKey = s => (s || "").replace(/\s/g, "");
+function matchOf(g, name) {
+  const nm = nameKey(name ?? g.name); if (!nm) return null;
+  const c = guests.filter(x => x.status === "expected" && nameKey(x.name) === nm);
+  return c.length === 1 ? c[0] : null;
+}
+function renderReview() {
+  const list = guests.filter(g => g.status === "review").sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const rb = $("#reviewBadge"); rb.hidden = !list.length; rb.textContent = list.length;
+  $("#reviewPanel").hidden = !list.length;
+  const key = list.map(g => g.id).join(",") + "|" + guests.filter(g => g.status === "expected").length;
+  const box = $("#reviewList");
+  if (key === reviewKey || box.contains(document.activeElement)) return; // 老師正在修改時不要重畫
+  reviewKey = key;
+  box.innerHTML = list.map(g => {
+    const m = matchOf(g);
+    return `<li class="rv" data-rv="${g.id}">
+      <div class="rvf">
+        <input type="text" data-f="title" value="${esc(g.title)}" maxlength="60" aria-label="頭銜" placeholder="頭銜">
+        <input type="text" data-f="name" value="${esc(g.name)}" maxlength="20" aria-label="姓名" placeholder="姓名">
+        <select data-f="cat" aria-label="身分">${CATS.map(c => `<option${c === g.cat ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>
+      </div>
+      <div class="match">${fmt(g.createdAt)} 送出${m ? `・名單中有 <b>${esc(who(m))}</b>，確認後會合併成同一筆` : "・不在預約名單中，確認後會新增"}</div>
+      <div class="btnrow"><button class="btn sm" data-act="rvok" data-id="${g.id}" data-first="0">確認報到</button><button class="btn sm koi" data-act="rvok" data-id="${g.id}" data-first="1">確認・第一優先</button><span data-rvdel="${g.id}"><button class="btn sm danger" data-act="rvask" data-id="${g.id}">刪除</button></span></div>
+    </li>`;
+  }).join("");
+}
+async function confirmSelf(id, first) {
+  const li = document.querySelector(`[data-rv="${id}"]`); if (!li) return;
+  const val = f => li.querySelector(`[data-f="${f}"]`).value.trim();
+  const title = val("title"), name = val("name"), cat = val("cat");
+  if (!name && !title) { toast("請至少保留姓名或頭銜"); return; }
+  const m = matchOf(null, name), now = Date.now(), by = me.displayName || me.email;
+  try {
+    await runTransaction(db, async tx => {
+      const sd = await tx.get(gref(id)); if (!sd.exists() || sd.data().status !== "review") throw new Error("gone");
+      if (m) {
+        const ed = await tx.get(gref(m.id));
+        if (ed.exists() && ed.data().status === "expected") {
+          tx.update(gref(m.id), { status: "arrived", arrivedAt: sd.data().arrivedAt || now, first, rank: null, selfReported: true, reporterName: "自助報到・" + by });
+          tx.delete(gref(id)); return;
+        }
+      }
+      tx.update(gref(id), { title, name, cat, first, status: "arrived", rank: null, reporterName: "自助報到・" + by });
+    });
+    reviewKey = ""; toast(`${name || title} 已確認${first ? "（第一優先）" : ""}`);
+  } catch (e) { toast(e && e.message === "gone" ? "這筆已被其他老師處理" : "確認失敗，請再試一次"); reviewKey = ""; render(); }
 }
 
 // ---------- 登入與資料連線 ----------
@@ -450,14 +497,15 @@ function startListeners() {
         }
       }
       if (urgent) { stageTab = grpOf(urgent); pPage = 0; }
-      if (n) ding(!!urgent);
+      const newReview = guests.some(g => g.status === "review" && prevStatus.get(g.id) === undefined);
+      if (newReview) toast("有新的自助報到等待確認");
+      if (n || newReview) ding(!!urgent);
     }
     prevStatus = new Map(guests.map(g => [g.id, g.status])); loaded = true;
-    render(); mergeSelf();
+    render();
   }, e => { clearTimeout(timer); setStatus(e.code === "permission-denied" ? "你的帳號沒有權限讀取名單。" : "連線中斷，請重新整理頁面。", true); }));
   unsubs.push(onSnapshot(doc(db, "settings", "staff"), s => {
-    staffDoc = s.exists() ? s.data() : { admins: [], emails: [] };
-    isAdmin = (staffDoc.admins || []).includes(me.email);
+    if (s.exists()) { staffDoc = s.data(); applyRole(roleOf(staffDoc)); }
     render();
   }, () => {}));
 }
@@ -472,20 +520,36 @@ function watchEvent() {
   }, () => {});
 }
 
-async function checkStaff(u) {
-  const email = (u.email || "").toLowerCase();
+function roleOf(d) {
+  if (!me || !d) return "none";
+  if (d.owner === me.email) return "owner";
+  if ((d.admins || []).includes(me.email)) return "admin";
+  if ((d.emails || []).includes(me.email)) return "staff";
+  return "none";
+}
+function applyRole(r) {
+  isOwner = r === "owner"; isAdmin = isOwner || r === "admin"; isStaff = isAdmin || r === "staff";
+  $("#userName").textContent = me ? `${me.displayName || me.email}${ROLE_NAME[r] ? "・" + ROLE_NAME[r] : ""}` : "";
+}
+async function checkStaff() {
   try {
     const s = await getDoc(doc(db, "settings", "staff"));
-    staffDoc = s.data(); return { staff: true, admin: (staffDoc.admins || []).includes(email) };
+    if (s.exists()) {
+      staffDoc = s.data(); const r = roleOf(staffDoc);
+      if (r !== "none") return r;
+      // 讀得到卻不在名單上：代表安全規則把你指定為新的系統管理者，更新名單上的紀錄
+      staffDoc = { ...staffDoc, owner: me.email, admins: (staffDoc.admins || []).filter(e => e !== me.email), emails: (staffDoc.emails || []).filter(e => e !== me.email) };
+      try { await setDoc(doc(db, "settings", "staff"), staffDoc); return "owner"; }
+      catch (e2) { return "none"; }
+    }
+    // 名單還不存在：只有安全規則指定的系統管理者讀得到這裡，替系統建立名單
+    staffDoc = { owner: me.email, admins: [], emails: [] };
+    await setDoc(doc(db, "settings", "staff"), staffDoc);
+    toast("已建立帳號名單，你是系統管理者");
+    return "owner";
   } catch (e) {
-    if (e.code !== "permission-denied") throw e;
-    // 讀不到：不是工作人員，或系統第一次使用。嘗試成為第一位管理者（只有名單還不存在時會成功）
-    try {
-      staffDoc = { admins: [email], emails: [] };
-      await setDoc(doc(db, "settings", "staff"), staffDoc);
-      toast("你是第一位登入的人，已設為管理者");
-      return { staff: true, admin: true };
-    } catch (e2) { return { staff: false, admin: false }; }
+    if (e.code === "permission-denied") return "none";
+    throw e;
   }
 }
 
@@ -503,21 +567,61 @@ $("#logoutBtn").addEventListener("click", () => signOut(auth));
 
 drawLanding();
 if (!configured) {
-  $("#setupPanel").hidden = false; $("#loginBtn").disabled = true; showView("landing");
+  $("#setupPanel").hidden = false; $("#loginBtn").disabled = true; $("#pwBtn").disabled = true; showView("landing");
 } else {
   watchEvent();
-  onAuthStateChanged(auth, async u => {
-    stopListeners();
-    me = u && !u.isAnonymous ? { email: (u.email || "").toLowerCase(), displayName: u.displayName || "" } : null;
-    $("#userName").hidden = !me; $("#logoutBtn").hidden = !me;
-    $("#userName").textContent = me ? (me.displayName || me.email) : "";
-    isStaff = false; isAdmin = false;
-    if (me) {
-      const r = await checkStaff(u);
-      isStaff = r.staff; isAdmin = r.admin;
-      if (!isStaff) { $("#loginMsg").textContent = `${me.email} 還不是工作人員。請管理者在「名單與 QR → 工作人員帳號」加入這個帳號後，重新整理頁面。`; }
-      else startListeners();
-    } else $("#loginMsg").textContent = "接待老師、司儀與校長請用學校的 Google 帳號登入。";
-    route();
-  });
+  onAuthStateChanged(auth, u => handleUser(u));
 }
+
+let verifySent = "";
+async function handleUser(u) {
+  stopListeners();
+  me = u && !u.isAnonymous ? { email: (u.email || "").toLowerCase(), displayName: u.displayName || "" } : null;
+  $("#userName").hidden = !me; $("#logoutBtn").hidden = !me;
+  $("#loginForms").hidden = !!me; $("#verifyBox").hidden = true; $("#loginErr").hidden = true;
+  applyRole("none");
+  if (me) {
+    const isPw = (u.providerData || []).some(p => p.providerId === "password");
+    if (isPw && !u.emailVerified) {
+      $("#verifyEmail").textContent = me.email; $("#verifyBox").hidden = false;
+      $("#loginMsg").textContent = "帳號密碼登入的老師，第一次使用要先驗證電子郵件。";
+      if (verifySent !== u.uid) { verifySent = u.uid; sendEmailVerification(u).catch(() => {}); }
+      route(); return;
+    }
+    let r = "none";
+    try { r = await checkStaff(); } catch (e) { $("#loginErr").textContent = "無法連線資料庫，請稍後重新整理。"; $("#loginErr").hidden = false; }
+    applyRole(r);
+    if (!isStaff) $("#loginMsg").textContent = `${me.email} 還沒有使用權限。請管理者在「名單與 QR → 帳號與權限」加入這個帳號後，重新整理頁面。`;
+    else startListeners();
+  } else $("#loginMsg").textContent = "接待老師、司儀與校長請登入後使用。";
+  route();
+}
+
+// 帳號密碼登入
+$("#pwForm").addEventListener("submit", async e => {
+  e.preventDefault(); const err = $("#loginErr"); err.hidden = true;
+  const email = $("#pw-email").value.trim(), pass = $("#pw-pass").value;
+  if (!email || !pass) { err.textContent = "請輸入帳號與密碼。"; err.hidden = false; return; }
+  const b = $("#pwBtn"); b.disabled = true;
+  try { await signInWithEmailAndPassword(auth, email, pass); $("#pw-pass").value = ""; }
+  catch (ex) {
+    const c = ex && ex.code;
+    err.textContent = c === "auth/invalid-credential" || c === "auth/wrong-password" || c === "auth/user-not-found" || c === "auth/invalid-email" ? "帳號或密碼不正確。" : c === "auth/too-many-requests" ? "嘗試次數太多，請稍後再試，或按「忘記密碼」重設。" : c === "auth/operation-not-allowed" ? "系統尚未開啟帳號密碼登入，請洽系統管理者。" : "登入失敗，請再試一次。";
+    err.hidden = false;
+  } finally { b.disabled = false; }
+});
+$("#forgotBtn").addEventListener("click", async () => {
+  const email = $("#pw-email").value.trim(), err = $("#loginErr");
+  if (!email) { err.textContent = "請先在「帳號」欄輸入你的電子郵件，再按忘記密碼。"; err.hidden = false; return; }
+  try { await sendPasswordResetEmail(auth, email); } catch (e) {}
+  err.hidden = true; toast("如果這個帳號存在，重設密碼的信已寄出，請查看信箱");
+});
+$("#resendBtn").addEventListener("click", async () => {
+  try { await sendEmailVerification(auth.currentUser); toast("驗證信已重新寄出"); } catch (e) { toast("寄送太頻繁，請稍後再試"); }
+});
+$("#verifiedBtn").addEventListener("click", async () => {
+  const u = auth.currentUser; if (!u) return;
+  await u.reload(); await u.getIdToken(true);
+  if (!u.emailVerified) { toast("還沒有完成驗證，請到信箱點連結"); return; }
+  handleUser(u);
+});

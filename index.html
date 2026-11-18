@@ -21,7 +21,7 @@
       <div class="userbox"><span class="clock" id="clock"></span><span id="userName" hidden></span><button class="btn sm" id="logoutBtn" type="button" hidden>登出</button></div>
     </div>
     <nav class="tabs" aria-label="功能" id="tabs" hidden>
-      <a href="#reception" data-view="reception">接待報到</a>
+      <a href="#reception" data-view="reception">接待報到<span class="badge" id="reviewBadge" hidden>0</span></a>
       <a href="#stage" data-view="stage">介紹台<span class="badge" id="pendBadge" hidden>0</span></a>
       <a href="#guests" data-view="guests">名單與 QR</a>
     </nav>
@@ -40,9 +40,23 @@
     </div>
     <div class="panel">
       <h2 class="sec">工作人員</h2>
-      <p class="hint" style="margin:0" id="loginMsg">接待老師、司儀與校長請用學校的 Google 帳號登入。</p>
+      <p class="hint" style="margin:0" id="loginMsg">接待老師、司儀與校長請登入後使用。</p>
       <div class="err" id="loginErr" hidden></div>
-      <div class="btnrow"><button class="btn" id="loginBtn" type="button">以 Google 帳號登入</button></div>
+      <div id="loginForms">
+        <div class="btnrow"><button class="btn" id="loginBtn" type="button">以 Google 帳號登入</button></div>
+        <div class="orline"><span>或使用學校發的帳號密碼</span></div>
+        <form id="pwForm" class="adm" novalidate>
+          <div class="row2">
+            <div class="field"><label for="pw-email">帳號（電子郵件）</label><input type="text" id="pw-email" inputmode="email" autocomplete="username" placeholder="teacher@example.com"></div>
+            <div class="field"><label for="pw-pass">密碼</label><input type="password" id="pw-pass" autocomplete="current-password"></div>
+          </div>
+          <div class="btnrow" style="align-items:center"><button class="btn ghost" type="submit" id="pwBtn">登入</button><button class="linkbtn" type="button" id="forgotBtn">忘記密碼</button></div>
+        </form>
+      </div>
+      <div id="verifyBox" class="adm" hidden>
+        <p style="margin:0">已寄出驗證信到 <b id="verifyEmail"></b>。請到信箱點驗證連結，回到這裡按「我已完成驗證」。</p>
+        <div class="btnrow"><button class="btn" type="button" id="verifiedBtn">我已完成驗證</button><button class="btn ghost" type="button" id="resendBtn">重新寄送驗證信</button></div>
+      </div>
     </div>
     <div class="panel" id="setupPanel" hidden>
       <h2 class="sec">尚未完成設定</h2>
@@ -54,6 +68,11 @@
   <section id="v-reception" class="wrap" hidden>
     <div class="status-line" id="st1"></div>
     <div class="scan" id="scanCard" hidden></div>
+
+    <div class="panel review" id="reviewPanel" hidden>
+      <h2 class="sec">待確認的自助報到 <span class="hint">來賓自己掃 QR 填的；確認無誤才會送上介紹台，惡作劇請直接刪除</span></h2>
+      <ul class="glist" id="reviewList"></ul>
+    </div>
 
     <div class="panel">
       <h2 class="sec">預約來賓 <span class="hint">掃來賓的 QR Code，或在這裡搜尋後點「報到」</span></h2>
@@ -77,7 +96,7 @@
     </form>
 
     <div class="panel">
-      <h2 class="sec">剛剛通報 <span class="hint">按錯可以撤回；<span class="self">自助</span> 是來賓自己掃 QR 填的</span></h2>
+      <h2 class="sec">剛剛通報 <span class="hint">按錯可以撤回；<span class="self">自助</span> 是來賓自己掃 QR 填、經老師確認的</span></h2>
       <ul class="glist" id="recentList"></ul>
     </div>
   </section>
@@ -120,17 +139,19 @@
     </div>
 
     <div class="panel" id="staffPanel" hidden>
-      <h2 class="sec">工作人員帳號 <span class="hint">管理者；只有名單上的 Google 帳號能登入操作</span></h2>
-      <div class="field"><span class="lbl">管理者 <span class="hint">（可改設定、管理帳號、清空名單）</span></span><ul class="chiplist" id="adminList"></ul></div>
-      <div class="field"><span class="lbl">工作人員 <span class="hint">（接待老師、司儀、校長）</span></span><ul class="chiplist" id="staffList"></ul></div>
+      <h2 class="sec">帳號與權限 <span class="hint">只有名單上的帳號能登入操作</span></h2>
+      <div class="field"><span class="lbl">系統管理者 <span class="hint">（最高權限：管理「管理者」名單；在安全規則中指定，無法從網站移除）</span></span><ul class="chiplist" id="ownerList"></ul></div>
+      <div class="field"><span class="lbl">管理者 <span class="hint">（管理工作人員、活動設定、匯入與清空名單）</span></span><ul class="chiplist" id="adminList"></ul></div>
+      <div class="field"><span class="lbl">工作人員 <span class="hint">（接待報到、確認自助報到、介紹台）</span></span><ul class="chiplist" id="staffList"></ul></div>
+      <p class="hint" style="margin:0">用帳號密碼登入的老師：先由管理者在 Firebase 主控台「Authentication → 使用者 → 新增使用者」建立帳號，再把同一個電子郵件加到這裡。老師第一次登入時要到信箱完成驗證。</p>
       <div class="inline">
         <input type="text" id="newEmail" placeholder="輸入 Gmail 或學校 Google 帳號" aria-label="新增帳號" inputmode="email" autocomplete="off">
         <button class="btn" type="button" id="addStaff">加為工作人員</button>
-        <button class="btn ghost" type="button" id="addAdmin">加為管理者</button>
+        <button class="btn ghost" type="button" id="addAdmin" hidden>加為管理者</button>
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel admin-only">
       <h2 class="sec">匯入外部名單 <span class="hint">Excel（.xlsx、.xls）或 CSV；Google 表單／試算表可先「下載」成這些格式</span></h2>
       <div class="btnrow" style="align-items:center">
         <label class="btn" for="impFile" tabindex="0" id="impPick">選擇檔案</label>
@@ -153,7 +174,7 @@
     </div>
 
     <div class="row2" style="align-items:start">
-      <div class="panel">
+      <div class="panel admin-only">
         <h2 class="sec">手動貼上名單 <span class="hint">也可以直接從 Excel 複製貼上</span></h2>
         <p class="hint" style="margin:0">一行一位，格式：<b>頭銜，姓名，身分</b>。身分可省略（預設貴賓）。<br>例：前山國小 校長，陳志明，貴賓</p>
         <textarea id="bulk" placeholder="南投縣政府 縣長，王大明，長官&#10;前山國小 校長，陳志明，貴賓&#10;家長會 會長，林美玲，家長"></textarea>
@@ -162,6 +183,7 @@
       </div>
       <div class="panel">
         <h2 class="sec">目前名單 <span class="hint" id="countLine"></span></h2>
+        <p class="hint admin-note" style="margin:0" hidden>匯入、刪除與清空名單需要管理者權限。</p>
         <ul class="mini" id="allList"></ul>
         <div class="confirm" id="clearBox"></div>
       </div>
@@ -178,7 +200,7 @@
         <h2 class="sec">來賓自助報到 QR</h2>
         <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
           <div class="qrc" style="width:160px"><canvas id="selfQR2"></canvas><div class="nm">自助報到</div></div>
-          <p class="hint" style="margin:0;flex:1 1 200px">印出來貼在入口或簽到桌。來賓不用登入，掃描後填頭銜與姓名就會出現在介紹台。若他已在預約名單中，系統會自動合併成同一筆。</p>
+          <p class="hint" style="margin:0;flex:1 1 200px">印出來貼在入口或簽到桌。來賓不用登入，掃描後填頭銜與姓名，會先出現在「接待報到」的待確認區，老師確認後才送上介紹台。若他已在預約名單中，確認時會自動合併成同一筆。</p>
         </div>
       </div>
       <div class="panel">

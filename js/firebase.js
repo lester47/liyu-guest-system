@@ -2,7 +2,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signInAnonymously,
-  onAuthStateChanged, signOut
+  onAuthStateChanged, signOut, signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc,
@@ -31,6 +31,7 @@ export async function googleLogin() {
 
 export {
   signInAnonymously, onAuthStateChanged, signOut,
+  signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification,
   collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, orderBy, limit, writeBatch, runTransaction
 };

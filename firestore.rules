@@ -5,45 +5,60 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isGoogle() {
-      return request.auth != null && request.auth.token.firebase.sign_in_provider == 'google.com';
+    // ★ 第一次使用前必改：系統管理者（最高權限）的電子郵件，全部小寫
+    //   只有這個帳號能新增或移除「管理者」，也無法從網站上被移除。
+    //   要換人時，改這裡並重新發布規則即可。
+    function ownerEmail() { return '請改成系統管理者的電子郵件@gmail.com'; }
+
+    // 工作人員只能用 Google 或「帳號密碼」登入，而且電子郵件必須已驗證
+    function isStaffLogin() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider in ['google.com', 'password']
+        && request.auth.token.email_verified == true;
     }
     function myEmail() { return request.auth.token.email.lower(); }
     function staffPath() { return /databases/$(database)/documents/settings/staff; }
     function staffList() { return get(staffPath()).data; }
+
+    // 三層權限：系統管理者 > 管理者 > 工作人員
+    function isOwner() { return isStaffLogin() && myEmail() == ownerEmail(); }
     function isAdmin() {
-      return isGoogle() && exists(staffPath()) && myEmail() in staffList().admins;
+      return isOwner() || (isStaffLogin() && exists(staffPath()) && myEmail() in staffList().admins);
     }
     function isStaff() {
-      return isGoogle() && exists(staffPath())
-        && (myEmail() in staffList().admins || myEmail() in staffList().emails);
+      return isAdmin() || (isStaffLogin() && exists(staffPath()) && myEmail() in staffList().emails);
     }
 
-    // 來賓自己掃 QR 送出的資料：只能新增「已到場」的一筆，欄位與長度都受限
-    function validSelf() {
+    // 來賓自助報到：匿名登入，只能新增一筆「待確認」資料，欄位與長度都受限
+    function validSelf(id) {
       let d = request.resource.data;
-      return d.keys().hasOnly(['title', 'name', 'cat', 'first', 'status', 'source', 'createdAt', 'arrivedAt'])
-        && d.status == 'arrived' && d.source == 'self' && d.first == false
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+        && id == request.auth.uid                       // 每次匿名登入只能送一筆
+        && d.keys().hasOnly(['title', 'name', 'cat', 'first', 'status', 'source', 'createdAt', 'arrivedAt'])
+        && d.status == 'review' && d.source == 'self' && d.first == false
         && d.name is string && d.name.size() > 0 && d.name.size() <= 20
         && d.title is string && d.title.size() <= 60
         && d.cat in ['長官', '貴賓', '家長', '其他']   // 若改了 js/config.js 的 CATS，這裡也要一起改
         && d.createdAt is number && d.arrivedAt is number;
     }
 
-    // 工作人員與管理者名單
+    // 帳號與權限名單 {owner, admins, emails}
     match /settings/staff {
       allow get: if isStaff();
-      // 系統第一次使用：第一位用 Google 登入的人可以把自己設為管理者（名單已存在就不能再建立）
-      allow create: if isGoogle()
-        && request.resource.data.keys().hasOnly(['admins', 'emails'])
-        && request.resource.data.admins == [myEmail()]
+      // 第一次使用：系統管理者登入時建立空白名單
+      allow create: if isOwner()
+        && request.resource.data.keys().hasOnly(['owner', 'admins', 'emails'])
+        && request.resource.data.owner == ownerEmail()
+        && request.resource.data.admins == []
         && request.resource.data.emails == [];
-      // 只有管理者能改名單，而且不能把自己從管理者移除
-      allow update: if isAdmin()
-        && request.resource.data.keys().hasOnly(['admins', 'emails'])
+      // 系統管理者：可調整管理者與工作人員
+      // 管理者：只能調整工作人員，不能動管理者名單
+      allow update: if request.resource.data.keys().hasOnly(['owner', 'admins', 'emails'])
+        && request.resource.data.owner == ownerEmail()
         && request.resource.data.admins is list
         && request.resource.data.emails is list
-        && myEmail() in request.resource.data.admins;
+        && (isOwner() || (isAdmin() && request.resource.data.admins == resource.data.admins));
       allow delete: if false;
     }
 
@@ -53,10 +68,17 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // 來賓名單：工作人員可讀寫；來賓（匿名登入）只能新增自己的報到
+    // 來賓名單
+    //   管理者：匯入、編輯、刪除、清空
+    //   工作人員：報到、確認、移動卡片；只能新增臨時來賓，只能刪除臨時來賓與自助報到
+    //   來賓：只能新增自己的一筆待確認報到，讀不到任何資料
     match /guests/{id} {
-      allow read, update, delete: if isStaff();
-      allow create: if isStaff() || (request.auth != null && validSelf());
+      allow read, update: if isStaff();
+      allow create: if isAdmin()
+        || (isStaff() && request.resource.data.source == 'walkin')
+        || validSelf(id);
+      allow delete: if isAdmin()
+        || (isStaff() && resource.data.source in ['walkin', 'self']);
     }
 
     // 其他路徑一律拒絕
