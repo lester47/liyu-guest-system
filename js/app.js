@@ -13,7 +13,11 @@ const catRank = c => { const i = CATS.indexOf(c); return i < 0 ? 99 : i; };
 const grpOf = g => CATS.includes(g.cat) ? g.cat : LAST;
 const nameKey = s => (s || "").replace(/\s/g, "");
 const who = g => `${g.title ? g.title + " " : ""}${g.name || ""}`.trim();
-const catPill = c => `<span class="cat${c === CATS[0] ? " c0" : ""}">${esc(c)}</span>`;
+const catCls = c => { const i = CATS.indexOf(c); return "k" + (i < 0 ? CATS.length - 1 : i); };
+const catPill = c => `<span class="cat ${catCls(c)}">${esc(c)}</span>`;
+// 報到序號：像醫院掛號，每場活動從 001 開始
+const noTxt = n => typeof n === "number" ? String(n).padStart(3, "0") : "";
+const noPill = g => typeof g.no === "number" ? `<span class="regno">${noTxt(g.no)}<small>號</small></span>` : (g.status === "arrived" || g.status === "introduced") && !numBlocked ? `<span class="regno wait">取號中</span>` : "";
 const P_SIZE = 8, D_SIZE = 15;
 
 // ---------- 狀態 ----------
@@ -31,13 +35,15 @@ let conn = { online: false, syncedAt: 0, updatedAt: 0, offlineSince: 0, startedA
 let nextId = null, pinned = false, knownFirst = new Set(), firstAlertId = null, dismissed = new Set(), forceNext = null, undoInfo = null;
 // 活動紀錄
 let archives = [], archErr = "", archAsk = null;
+let allIds = [], numbering = false, numTimer = null, numBlocked = false;
+const counterRef = () => doc(db, "settings", "counter");
 try { const t = localStorage.getItem("liyu-exp-tab"); if (CATS.includes(t)) expTab = t; } catch (e) {}
 try { const t = localStorage.getItem("liyu-stage-tab"); if (CATS.includes(t)) stageTab = t; } catch (e) {}
 
 $("#schoolName").textContent = SCHOOL.name;
 startClock($("#clock"));
 $("#w-cat").innerHTML = CATS.map((c, i) => `<input type="radio" name="wcat" id="wcat${i}" value="${esc(c)}"${i === 1 ? " checked" : ""}><label for="wcat${i}">${esc(c)}</label>`).join("");
-const tabsHtml = cls => CATS.map(c => `<button type="button" role="tab" class="stab ${cls}" data-grp="${esc(c)}">${esc(c)} <span class="cnt">0</span></button>`).join("");
+const tabsHtml = cls => CATS.map(c => `<button type="button" role="tab" class="stab ${cls} ${catCls(c)}" data-grp="${esc(c)}">${esc(c)} <span class="cnt">0</span></button>`).join("");
 $("#subtabs").innerHTML = tabsHtml("exp");
 $("#stageTabs").innerHTML = tabsHtml("stg");
 
@@ -143,7 +149,7 @@ function render() {
     if (!loaded) { sc.className = "scan"; sc.innerHTML = `<div class="ttl">讀取來賓資料中…</div>`; }
     else if (!g) { sc.className = "scan"; sc.innerHTML = `<div class="who">找不到這張 QR Code</div><div class="ttl">可能已從名單刪除。請改用下方「臨時來賓」通報。</div><div><button class="btn ghost" data-act="closescan">關閉</button></div>`; }
     else if (g.status === "expected") { sc.className = "scan"; sc.innerHTML = `<div class="ttl">${esc(g.title)}</div><div class="who">${esc(g.name)}</div><div>${catPill(g.cat)}</div><div class="btnrow fill"><button class="btn big" data-act="arrive" data-id="${g.id}" data-first="0">報到（一般）</button><button class="btn big koi" data-act="arrive" data-id="${g.id}" data-first="1">報到・第一優先</button></div><div><button class="btn ghost sm" data-act="closescan">取消</button></div>`; }
-    else { sc.className = "scan okay"; sc.innerHTML = `<div class="ttl">${esc(g.title)}</div><div class="who">${esc(g.name)}</div><div class="state">${g.status === "introduced" ? "已報到，也已介紹過" : "已報到"}（${fmt(g.arrivedAt)}）${g.first ? "・第一優先" : ""}</div><div class="btnrow" style="justify-content:center">${g.status === "arrived" && !g.first ? `<button class="btn koi sm" data-act="setfirst" data-id="${g.id}">改為第一優先</button>` : ""}<button class="btn ghost sm" data-act="closescan">完成</button></div>`; }
+    else { sc.className = "scan okay"; sc.innerHTML = `${typeof g.no === "number" ? `<div class="bigno"><small>報到序號</small>${noTxt(g.no)}</div>` : numBlocked ? "" : `<div class="bigno wait"><small>報到序號</small>取號中…</div>`}<div class="ttl">${esc(g.title)}</div><div class="who">${esc(g.name)}</div><div class="state">${g.status === "introduced" ? "已報到，也已介紹過" : "已報到"}（${fmt(g.arrivedAt)}）${g.first ? "・第一優先" : ""}</div><div class="btnrow" style="justify-content:center">${g.status === "arrived" && !g.first ? `<button class="btn koi sm" data-act="setfirst" data-id="${g.id}">改為第一優先</button>` : ""}<button class="btn ghost sm" data-act="closescan">完成</button></div>`; }
   } else sc.hidden = true;
 
   // 送達狀態橫幅
@@ -167,7 +173,7 @@ function render() {
 
   // 剛剛通報（這台裝置還沒送達的排最前面）
   const recent = guests.filter(g => g.status === "arrived" || g.status === "introduced").sort((a, b) => (b._pending ? 1 : 0) - (a._pending ? 1 : 0) || (b.arrivedAt || 0) - (a.arrivedAt || 0)).slice(0, 8);
-  $("#recentList").innerHTML = recent.length ? recent.map(g => `<li class="g${g._pending ? " pend" : ""}"><div class="info">${g.first ? `<span class="first">第一優先</span> ` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span> ` : ""}<span class="nm">${esc(who(g))}</span> ${delivTag(g)}<div class="tt">${fmt(g.arrivedAt)} 報到${g.status === "introduced" ? "・已介紹" : ""}${g.reporterName ? "・" + esc(g.reporterName) : ""}</div></div>${g.status === "introduced" ? "" : `<div class="btnrow">${g.first ? `<button class="btn sm ghost" data-act="unfirst" data-id="${g.id}">取消優先</button>` : `<button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">設第一優先</button>`}<button class="btn sm danger" data-act="undo" data-id="${g.id}">撤回</button></div>`}</li>`).join("") : `<li class="empty">還沒有人報到。</li>`;
+  $("#recentList").innerHTML = recent.length ? recent.map(g => `<li class="g${g._pending ? " pend" : ""}"><div class="info">${g.first ? `<span class="first">第一優先</span> ` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span> ` : ""}${noPill(g)} <span class="nm">${esc(who(g))}</span> ${delivTag(g)}<div class="tt">${fmt(g.arrivedAt)} 報到${g.status === "introduced" ? "・已介紹" : ""}${g.reporterName ? "・" + esc(g.reporterName) : ""}</div></div>${g.status === "introduced" ? "" : `<div class="btnrow">${g.first ? `<button class="btn sm ghost" data-act="unfirst" data-id="${g.id}">取消優先</button>` : `<button class="btn sm ghost" data-act="setfirst" data-id="${g.id}">設第一優先</button>`}<button class="btn sm danger" data-act="undo" data-id="${g.id}">撤回</button></div>`}</li>`).join("") : `<li class="empty">還沒有人報到。</li>`;
 
   // 介紹台：下一位
   curPending = pendingAll.map(g => g.id);
@@ -190,12 +196,12 @@ function render() {
   const otherPend = CATS.filter(c => c !== stageTab && scnt[c]).map(c => `${c} ${scnt[c]} 位`);
   if (!drag) {
     $("#pendList").innerHTML = tabItems.length
-      ? tabItems.slice(pStart, pStart + P_SIZE).map((g, i) => `<li class="prow" data-id="${g.id}"><button class="handle" data-handle data-id="${g.id}" aria-label="拖曳或用上下鍵調整 ${esc(g.name || g.title)} 的順序">⋮⋮</button><button class="card${g.first ? " isfirst" : ""}${fresh.has(g.id) ? " fresh" : ""}${nx && nx.id === g.id ? " isnext" : ""}" data-act="intro" data-id="${g.id}"><span class="ord">${pStart + i + 1}</span><span class="line"><small>${esc(g.title)}</small>${esc(g.name)}</span><span class="meta">${nx && nx.id === g.id ? `<span class="nexttag">下一位</span>` : ""}${g.first ? `<span class="first">第一優先</span>` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span>` : ""}${catPill(g.cat)}${fmt(g.arrivedAt)} 到場</span></button></li>`).join("")
+      ? tabItems.slice(pStart, pStart + P_SIZE).map((g, i) => `<li class="prow" data-id="${g.id}"><button class="handle" data-handle data-id="${g.id}" aria-label="拖曳或用上下鍵調整 ${esc(g.name || g.title)} 的順序">⋮⋮</button><button class="card${g.first ? " isfirst" : ""}${fresh.has(g.id) ? " fresh" : ""}${nx && nx.id === g.id ? " isnext" : ""}" data-act="intro" data-id="${g.id}"><span class="ord">${pStart + i + 1}</span><span class="line"><small>${esc(g.title)}</small>${esc(g.name)}</span><span class="meta">${noPill(g)}${nx && nx.id === g.id ? `<span class="nexttag">下一位</span>` : ""}${g.first ? `<span class="first">第一優先</span>` : ""}${g.selfReported || g.source === "self" ? `<span class="self">自助</span>` : ""}${catPill(g.cat)}${fmt(g.arrivedAt)} 到場</span></button></li>`).join("")
       : `<li class="empty">${!loaded ? "讀取中…" : otherPend.length ? `「${esc(stageTab)}」目前沒有待介紹；其他頁簽：${otherPend.join("、")}。` : "目前沒有待介紹的來賓。接待老師報到後會即時出現在這裡。"}</li>`;
     $("#pendPager").innerHTML = pager("p", pPage, pPages, tabItems.length, tabItems.slice(0, pStart).some(g => g.first));
   }
   $("#donePager").innerHTML = pager("d", dPage, dPages, done.length, false);
-  $("#doneList").innerHTML = done.length ? done.slice(dStart, dStart + D_SIZE).map(g => `<li class="dcard"><span class="ord">✓</span><span class="dinfo"><span class="line">${esc(who(g))}</span><span class="meta">${fmt(g.introducedAt)} 介紹</span></span><button class="btn sm ghost" data-act="back" data-id="${g.id}">↩ 送回待介紹</button></li>`).join("") : `<li class="empty">尚無</li>`;
+  $("#doneList").innerHTML = done.length ? done.slice(dStart, dStart + D_SIZE).map(g => `<li class="dcard"><span class="ord">✓</span><span class="dinfo"><span class="line">${typeof g.no === "number" ? `<span class="regno sm">${noTxt(g.no)}</span> ` : ""}${esc(who(g))}</span><span class="meta">${fmt(g.introducedAt)} 介紹</span></span><button class="btn sm ghost" data-act="back" data-id="${g.id}">↩ 送回待介紹</button></li>`).join("") : `<li class="empty">尚無</li>`;
 
   // 名單與 QR
   $("#cfgPanel").hidden = !isAdmin; $("#staffPanel").hidden = !isAdmin || isOwner;
@@ -206,7 +212,7 @@ function render() {
   const total = guests.length, arr = guests.filter(g => g.status === "arrived" || g.status === "introduced").length;
   $("#countLine").textContent = total ? `共 ${total} 位・已報到 ${arr} 位` : "";
   const all = [...guests].sort((a, b) => catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
-  $("#allList").innerHTML = all.length ? all.map(g => `<li><span>${catPill(g.cat)} ${esc(who(g))}${g.status === "review" ? ` <span class="self">待確認</span>` : g.status !== "expected" ? ` <span class="hint">已報到</span>` : ""}</span>${isAdmin ? `<span data-delbox="${g.id}"><button class="btn sm danger" data-act="askdel" data-id="${g.id}">刪除</button></span>` : ""}</li>`).join("") : `<li class="empty" style="background:none">名單是空的</li>`;
+  $("#allList").innerHTML = all.length ? all.map(g => `<li><span>${catPill(g.cat)} ${typeof g.no === "number" ? `<span class="regno sm">${noTxt(g.no)}</span> ` : ""}${esc(who(g))}${g.status === "review" ? ` <span class="self">待確認</span>` : g.status !== "expected" ? ` <span class="hint">已報到</span>` : ""}</span>${isAdmin ? `<span data-delbox="${g.id}"><button class="btn sm danger" data-act="askdel" data-id="${g.id}">刪除</button></span>` : ""}</li>`).join("") : `<li class="empty" style="background:none">名單是空的</li>`;
   // 清空只在還沒有人報到時開放（例如匯入錯檔）；活動結束請用「結案封存」
   const canClear = isAdmin && total && !guests.some(g => g.status === "arrived" || g.status === "introduced");
   if (!$("#clearBox").dataset.asking) $("#clearBox").innerHTML = canClear ? `<button class="btn sm danger" data-act="askclear">清空名單（還沒有人報到時才能用）</button>` : isAdmin && total ? `<span class="hint">已有來賓報到；活動結束請用上方「結案封存」，紀錄會保留下來。</span>` : "";
@@ -222,7 +228,7 @@ function renderSearch(q, qRaw) {
   const list = guests.filter(g => g.status !== "review" && hit(g))
     .sort((a, b) => (ST_RANK[a.status] ?? 3) - (ST_RANK[b.status] ?? 3) || catRank(a.cat) - catRank(b.cat) || (a.title || "").localeCompare(b.title || "", "zh-Hant"));
   const nameCnt = {}; list.forEach(g => { const k = nameKey(g.name); if (k) nameCnt[k] = (nameCnt[k] || 0) + 1; });
-  const stTag = g => g.status === "expected" ? `<span class="stt no">未報到</span>` : g.status === "arrived" ? `<span class="stt yes">已報到 ${fmt(g.arrivedAt)}</span>` : `<span class="stt yes">已報到・已介紹</span>`;
+  const stTag = g => g.status === "expected" ? `<span class="stt no">未報到</span>` : g.status === "arrived" ? `<span class="stt yes">已報到 ${fmt(g.arrivedAt)}</span> ${noPill(g)}` : `<span class="stt yes">已報到・已介紹</span> ${noPill(g)}`;
   const row = g => {
     const same = nameCnt[nameKey(g.name)] > 1;
     const btns = g.status === "expected" ? `<div class="btnrow"><button class="btn sm" data-act="arrive" data-id="${g.id}" data-first="0">報到</button><button class="btn sm koi" data-act="arrive" data-id="${g.id}" data-first="1">第一優先</button></div>`
@@ -261,7 +267,7 @@ function renderNext(nx, list) {
   if (!nx) box.innerHTML = `<div class="nb-lbl">下一位</div><div class="nb-empty">${loaded ? "目前沒有待介紹的來賓" : "讀取中…"}</div>`;
   else {
     const after = list.filter(g => g.id !== nx.id).slice(0, 2);
-    box.innerHTML = `<div class="nb-lbl">下一位 ${nx.first ? `<span class="first">第一優先</span>` : ""}${catPill(nx.cat)}<span class="hint">${fmt(nx.arrivedAt)} 到場</span></div>
+    box.innerHTML = `<div class="nb-lbl">下一位 ${noPill(nx)}${nx.first ? `<span class="first">第一優先</span>` : ""}${catPill(nx.cat)}<span class="hint">${fmt(nx.arrivedAt)} 到場</span></div>
       <div class="nb-title">${esc(nx.title) || "&nbsp;"}</div>
       <div class="nb-name">${esc(nx.name)}</div>
       <div class="nb-foot"><button class="btn big ok" type="button" data-act="intro" data-id="${nx.id}">✓ 介紹完畢</button>${after.length ? `<span class="nb-after">接著：${after.map(g => esc(who(g))).join("、")}</span>` : ""}</div>`;
@@ -341,7 +347,7 @@ document.addEventListener("click", async e => {
   if (act === "back") { b.disabled = true; setGuest(id, { status: "arrived", rank: null, introducedAt: null }, `${g ? g.name || g.title : ""} 已送回待介紹`); return; }
   if (act === "undo" && g) {
     if (g.source === "walkin" || g.source === "self") { try { await deleteDoc(gref(id)); toast("已撤回"); } catch (err) { toast("撤回失敗"); } }
-    else setGuest(id, { status: "expected", first: false, rank: null, arrivedAt: null, reporterName: null, selfReported: false }, "已撤回，回到預約名單");
+    else setGuest(id, { status: "expected", first: false, rank: null, arrivedAt: null, reporterName: null, selfReported: false, no: null }, "已撤回，回到預約名單");
     ackWatch.delete(id);
     return;
   }
@@ -358,7 +364,7 @@ document.addEventListener("click", async e => {
   if (act === "del") { try { await deleteDoc(gref(id)); toast("已刪除"); } catch (err) { toast("刪除失敗"); } return; }
   if (act === "askclear") { const box = $("#clearBox"); box.dataset.asking = "1"; box.innerHTML = `確定清空全部 ${guests.length} 位來賓？無法復原。<button class="btn sm danger" data-act="doclear">清空</button><button class="btn sm ghost" data-act="noclear">取消</button>`; return; }
   if (act === "noclear") { delete $("#clearBox").dataset.asking; render(); return; }
-  if (act === "doclear") { b.disabled = true; try { await batchWrite(guests.map(x => ({ type: "delete", id: x.id }))); toast("已清空名單"); } catch (err) { toast("清空失敗，需要管理者權限"); } delete $("#clearBox").dataset.asking; render(); return; }
+  if (act === "doclear") { b.disabled = true; try { await batchWrite(allIds.map(x => ({ type: "delete", id: x }))); toast("已清空名單"); } catch (err) { toast("清空失敗，需要管理者權限"); } delete $("#clearBox").dataset.asking; render(); return; }
   if (act === "rvok") { b.disabled = true; await confirmSelf(id, b.dataset.first === "1"); return; }
   if (act === "rvask") { document.querySelector(`[data-rvdel="${id}"]`).innerHTML = `<span class="confirm">確定刪除？<button class="btn sm danger" data-act="rvdel" data-id="${id}">刪除</button><button class="btn sm ghost" data-act="rvno">取消</button></span>`; return; }
   if (act === "rvno") { reviewKey = ""; render(); return; }
@@ -728,7 +734,7 @@ $("#requestBtn").addEventListener("click", async () => {
 const fullTime = ms => { if (!ms) return ""; const d = new Date(ms); return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const ST_LABEL = { expected: "未報到", review: "自助待確認", arrived: "已報到（待介紹）", introduced: "已介紹" };
 const SRC_LABEL = { preload: "手動貼上", import: "匯入名單", walkin: "臨時來賓", self: "自助報到" };
-const ARCH_FIELDS = ["title", "name", "cat", "status", "source", "first", "arrivedAt", "introducedAt", "reporterName", "selfReported", "createdAt", "rank"];
+const ARCH_FIELDS = ["no", "title", "name", "cat", "status", "source", "first", "arrivedAt", "introducedAt", "reporterName", "selfReported", "createdAt", "rank"];
 function rowOf(g) { const r = { id: g.id }; ARCH_FIELDS.forEach(k => r[k] = g[k] === undefined ? null : g[k]); r.first = !!g.first; r.selfReported = !!g.selfReported; return r; }
 function csvCell(v) {
   let s = String(v ?? "");
@@ -736,9 +742,9 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 function downloadCsv(list, eventName) {
-  const rows = [...list].sort((a, b) => catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
-  const head = ["頭銜", "姓名", "身分", "狀態", "第一優先", "來源", "報到時間", "介紹時間", "通報人"];
-  const body = rows.map(g => [g.title, g.name, g.cat, ST_LABEL[g.status] || g.status, g.first ? "是" : "", (SRC_LABEL[g.source] || g.source || "") + (g.selfReported && g.source !== "self" ? "（自助報到）" : ""), fullTime(g.arrivedAt), fullTime(g.introducedAt), g.reporterName || ""]);
+  const rows = [...list].filter(g => g.status !== "merged").sort((a, b) => (typeof a.no === "number" ? a.no : 1e9) - (typeof b.no === "number" ? b.no : 1e9) || catRank(a.cat) - catRank(b.cat) || (a.createdAt || 0) - (b.createdAt || 0));
+  const head = ["報到序號", "頭銜", "姓名", "身分", "狀態", "第一優先", "來源", "報到時間", "介紹時間", "通報人"];
+  const body = rows.map(g => [noTxt(g.no), g.title, g.name, g.cat, ST_LABEL[g.status] || g.status, g.first ? "是" : "", (SRC_LABEL[g.source] || g.source || "") + (g.selfReported && g.source !== "self" ? "（自助報到）" : ""), fullTime(g.arrivedAt), fullTime(g.introducedAt), g.reporterName || ""]);
   const csv = [head, ...body].map(r => r.map(csvCell).join(",")).join("\r\n");
   const d = new Date(), stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
   saveBlob(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }), `${String(eventName || "活動").replace(/[\\/:*?"<>|]/g, "_")}_來賓紀錄_${stamp}.csv`);
@@ -780,8 +786,9 @@ $("#doClose").addEventListener("click", async () => {
     err.hidden = false; b.disabled = false; return;
   }
   try {
-    await batchWrite(rows.map(g => ({ type: "delete", id: g.id })));
+    await batchWrite(allIds.map(x => ({ type: "delete", id: x })));
     await setDoc(doc(db, "settings", "event"), { event: next || ev, notice: "" });
+    await setDoc(counterRef(), { n: 0 }).catch(() => {});   // 下一場從 001 開始
     $("#closeBox").hidden = true; toast(`「${ev}」已結案封存${next ? `，目前活動：${next}` : ""}`);
   } catch (e) { err.textContent = "已封存，但清空名單時中斷；請再按一次「結案封存」或用「清空名單」。"; err.hidden = false; }
   b.disabled = false;
@@ -795,6 +802,7 @@ async function restoreArchive(id) {
     const rows = (s.exists() && s.data().guests) || [];
     await batchWrite(rows.map(r => { const { id: gid, ...data } = r; return { type: "set", id: gid || newId(), data }; }));
     await setDoc(doc(db, "settings", "event"), { event: a.event, notice: cfg.notice || "" });
+    await setDoc(counterRef(), { n: rows.reduce((m, r) => Math.max(m, typeof r.no === "number" ? r.no : 0), 0) }).catch(() => {});
     toast(`已切換回「${a.event}」，共 ${rows.length} 位`);
   } catch (e) { toast(e && e.code === "permission-denied" ? "切換失敗：需要管理者權限" : "切換失敗，請再試一次"); }
 }
@@ -852,20 +860,53 @@ async function confirmSelf(id, first) {
   const title = val("title"), name = val("name"), cat = val("cat");
   if (!name && !title) { toast("請至少保留姓名或頭銜"); return; }
   const m = matchOf(null, name), now = Date.now(), by = me.displayName || me.email;
+  const run = withNo => runTransaction(db, async tx => {
+    // Firestore 交易要先讀完再寫
+    const sd = await tx.get(gref(id)); if (!sd.exists() || sd.data().status !== "review") throw new Error("gone");
+    const ed = m ? await tx.get(gref(m.id)) : null;
+    const cs = withNo ? await tx.get(counterRef()) : null;
+    const no = withNo ? ((cs.exists() && cs.data().n) || 0) + 1 : null;
+    const numPatch = withNo ? { no } : {};
+    if (ed && ed.exists() && ed.data().status === "expected") {
+      tx.update(gref(m.id), { status: "arrived", arrivedAt: sd.data().arrivedAt || now, first, rank: null, selfReported: true, reporterName: "自助報到・" + by, ...numPatch });
+      // 自助那筆保留為 merged，讓來賓手機看得到序號；工作人員畫面不顯示，結案時一起刪除
+      if (withNo) tx.update(gref(id), { status: "merged", mergedInto: m.id, no }); else tx.delete(gref(id));
+    } else tx.update(gref(id), { title, name, cat, first, status: "arrived", rank: null, reporterName: "自助報到・" + by, ...numPatch });
+    if (withNo) tx.set(counterRef(), { n: no });
+    return no;
+  });
   try {
-    await runTransaction(db, async tx => {
-      const sd = await tx.get(gref(id)); if (!sd.exists() || sd.data().status !== "review") throw new Error("gone");
-      if (m) {
-        const ed = await tx.get(gref(m.id));
-        if (ed.exists() && ed.data().status === "expected") {
-          tx.update(gref(m.id), { status: "arrived", arrivedAt: sd.data().arrivedAt || now, first, rank: null, selfReported: true, reporterName: "自助報到・" + by });
-          tx.delete(gref(id)); return;
-        }
-      }
-      tx.update(gref(id), { title, name, cat, first, status: "arrived", rank: null, reporterName: "自助報到・" + by });
-    });
-    reviewKey = ""; toast(`✓ ${name || title} 已確認，已送達介紹台${first ? "（第一優先）" : ""}`);
+    let no;
+    try { no = numBlocked ? await run(false) : await run(true); }
+    catch (e) { if (e && e.code === "permission-denied" && !numBlocked) { numBlocked = true; no = await run(false); } else throw e; }
+    reviewKey = ""; toast(`✓ ${name || title} 已確認，已送達介紹台${no ? `・報到序號 ${noTxt(no)}` : ""}${first ? "（第一優先）" : ""}`);
   } catch (e) { toast(e && e.message === "gone" ? "這筆已被其他老師處理" : e && e.code === "unavailable" ? "網路不穩，這筆沒有送出，請連上網路後再按一次" : "確認失敗，請再試一次"); reviewKey = ""; render(); }
+}
+
+// ---------- 報到序號：已報到但還沒有號碼的，依報到時間依序取號 ----------
+// 報到本身不等伺服器（離線也能報到），號碼由任一台連線中的工作人員裝置用交易補上，多台同時補也不會重號
+function scheduleNumbering() {
+  if (numBlocked || numbering || numTimer || !conn.online) return;
+  if (!guests.some(g => (g.status === "arrived" || g.status === "introduced") && typeof g.no !== "number" && !g._pending)) return;
+  numTimer = setTimeout(assignNumbers, 150 + Math.random() * 450);
+}
+async function assignNumbers() {
+  numTimer = null; numbering = true;
+  const miss = guests.filter(g => (g.status === "arrived" || g.status === "introduced") && typeof g.no !== "number" && !g._pending)
+    .sort((a, b) => (a.arrivedAt || 0) - (b.arrivedAt || 0)).slice(0, 25);
+  try {
+    if (miss.length) await runTransaction(db, async tx => {
+      const cs = await tx.get(counterRef());
+      const snaps = await Promise.all(miss.map(g => tx.get(gref(g.id))));
+      const todo = snaps.filter(d => d.exists() && ["arrived", "introduced"].includes(d.data().status) && typeof d.data().no !== "number");
+      if (!todo.length) return;
+      let n = (cs.exists() && cs.data().n) || 0;
+      todo.forEach(d => tx.update(gref(d.id), { no: ++n }));
+      tx.set(counterRef(), { n });
+    });
+  } catch (e) { if (e && e.code === "permission-denied") { numBlocked = true; render(); } }
+  numbering = false;
+  setTimeout(scheduleNumbering, 300);
 }
 
 // ---------- 登入與資料連線 ----------
@@ -880,16 +921,19 @@ function startListeners() {
     const now = Date.now();
     if (snap.metadata.fromCache) { if (conn.online) conn.offlineSince = now; conn.online = false; }
     else { conn.online = true; conn.offlineSince = 0; conn.syncedAt = now; if (snap.docChanges().length || !conn.updatedAt) conn.updatedAt = now; }
-    guests = snap.docs.map(d => ({ id: d.id, ...d.data(), _pending: d.metadata.hasPendingWrites }));
+    const docsAll = snap.docs.map(d => ({ id: d.id, ...d.data(), _pending: d.metadata.hasPendingWrites }));
+    allIds = docsAll.map(g => g.id);
+    guests = docsAll.filter(g => g.status !== "merged");
     // 送達追蹤
     const byId = new Map(guests.map(g => [g.id, g]));
     for (const g of guests) { if (g._pending && !pendSince.has(g.id)) pendSince.set(g.id, now); }
     for (const id of [...pendSince.keys()]) { const g = byId.get(id); if (!g || !g._pending) pendSince.delete(id); }
     for (const [id, label] of [...ackWatch]) {
       const g = byId.get(id);
-      if (g && !g._pending && g.status === "arrived") { ackWatch.delete(id); toast(`✓ ${label || who(g)} 已送達介紹台`); }
+      if (g && !g._pending && g.status === "arrived" && (typeof g.no === "number" || numBlocked)) { ackWatch.delete(id); toast(`✓ ${label || who(g)} 已送達介紹台${typeof g.no === "number" ? `・報到序號 ${noTxt(g.no)}` : ""}`); }
       else if (!g || (g.status !== "arrived" && !g._pending)) ackWatch.delete(id);
     }
+    scheduleNumbering();
     if (loaded) {
       let n = false, urgent = null;
       for (const g of guests) {

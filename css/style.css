@@ -8,6 +8,7 @@
   --f-display:"LXGW WenKai TC","Noto Sans TC","PingFang TC","Microsoft JhengHei",serif;
   --f-body:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
   --r:12px;
+  --k0:#2a3a85; --k0s:#dde2f3; --k1:#b05d06; --k1s:#fbe9d2; --k2:#2f7d4a; --k2s:#dcefe2; --k3:#7444a6; --k3s:#ece2f6;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#12152a; --surface:#1a1e38; --surface-2:#222747; --line:#333a62;
@@ -15,6 +16,7 @@
   --pond:#8a9cf0; --pond-ink:#10132a; --pond-soft:#262d58;
   --koi:#f2765c; --koi-soft:#43201a;
   --gold:#e3b75c; --gold-soft:#3b2f15; --ok:#71c58c; --ok-soft:#1c3826; color-scheme:dark;
+  --k0:#8a9cf0; --k0s:#262d58; --k1:#f0a656; --k1s:#43301a; --k2:#71c58c; --k2s:#1c3826; --k3:#c39af0; --k3s:#33224a;
 }}
 :root[data-theme="dark"]{
   --bg:#12152a; --surface:#1a1e38; --surface-2:#222747; --line:#333a62;
@@ -22,6 +24,7 @@
   --pond:#8a9cf0; --pond-ink:#10132a; --pond-soft:#262d58;
   --koi:#f2765c; --koi-soft:#43201a;
   --gold:#e3b75c; --gold-soft:#3b2f15; --ok:#71c58c; --ok-soft:#1c3826; color-scheme:dark;
+  --k0:#8a9cf0; --k0s:#262d58; --k1:#f0a656; --k1s:#43301a; --k2:#71c58c; --k2s:#1c3826; --k3:#c39af0; --k3s:#33224a;
 }
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:16px;line-height:1.6}
@@ -73,7 +76,6 @@ input:focus-visible,textarea:focus-visible{outline:2px solid var(--pond);outline
 .btnrow.fill>.btn{flex:1 1 160px}
 .err{color:var(--koi);font-size:.9rem}
 .cat{display:inline-block;font-size:.75rem;font-weight:700;padding:1px 9px;border-radius:99px;background:var(--surface-2);color:var(--muted);vertical-align:middle}
-.cat.c0{background:var(--pond-soft);color:var(--pond)}
 .first{display:inline-block;font-size:.75rem;font-weight:700;padding:1px 9px;border-radius:99px;background:var(--koi);color:#fff;vertical-align:middle}
 
 /* scan card */
@@ -274,3 +276,31 @@ table.roles td{vertical-align:middle}
 /* ---- 活動紀錄 ---- */
 .closebox{padding:14px;border-radius:10px;background:var(--koi-soft)}
 .warnt{color:var(--koi)}
+
+/* ---- 四種身分各一個顏色：長官 靛藍、貴賓 橘、家長 綠、其他 紫 ---- */
+.k0{--kc:var(--k0);--ks:var(--k0s)} .k1{--kc:var(--k1);--ks:var(--k1s)} .k2{--kc:var(--k2);--ks:var(--k2s)} .k3{--kc:var(--k3);--ks:var(--k3s)}
+.cat[class*=" k"]{background:var(--ks);color:var(--kc)}
+.stab[class*=" k"]{color:var(--kc);box-shadow:inset 0 -4px 0 var(--kc)}
+.stab[class*=" k"].on{background:var(--kc);color:#fff;box-shadow:none}
+.stab[class*=" k"] .cnt{background:var(--ks);color:var(--kc)}
+.stab[class*=" k"].on .cnt{background:#fff;color:var(--kc)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .stab[class*=" k"].on{color:#10132a} :root:not([data-theme="light"]) .stab[class*=" k"].on .cnt{background:#10132a}}
+:root[data-theme="dark"] .stab[class*=" k"].on{color:#10132a}
+:root[data-theme="dark"] .stab[class*=" k"].on .cnt{background:#10132a}
+.stab.hasfirst .cnt,.stab.hasfirst.on .cnt{background:var(--koi);color:#fff}
+
+/* ---- 報到序號 ---- */
+.regno{display:inline-flex;align-items:baseline;gap:1px;font-family:var(--f-body);font-weight:700;font-variant-numeric:tabular-nums;font-size:.95rem;padding:1px 9px;border-radius:8px;background:var(--fg);color:var(--bg);vertical-align:middle;letter-spacing:.02em;white-space:nowrap}
+.regno small{font-size:.7em;font-weight:500;margin-left:1px}
+.regno.sm{font-size:.78rem;padding:0 7px}
+.regno.wait{background:transparent;color:var(--muted);border:1px dashed var(--line);font-size:.75rem;font-weight:500}
+.card .meta .regno{font-size:1.05rem;padding:2px 10px}
+.nb-lbl .regno{font-size:1.25rem;padding:2px 12px}
+.bigno{display:grid;justify-items:center;font-family:var(--f-body);font-weight:700;font-size:3rem;line-height:1;font-variant-numeric:tabular-nums;color:var(--ok)}
+.bigno small{font-size:.85rem;font-weight:500;color:var(--muted);margin-bottom:6px}
+.bigno.wait{font-size:1.2rem;color:var(--muted)}
+.myno{display:grid;justify-items:center;gap:2px;padding:14px 24px;border-radius:14px;background:var(--surface-2)}
+.myno small{color:var(--muted)}
+.myno b{font-size:3.4rem;line-height:1;font-variant-numeric:tabular-nums;color:var(--ok)}
+.myno .wait{color:var(--muted);font-size:.95rem}
+.myno.ok{background:var(--ok-soft)}

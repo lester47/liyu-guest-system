@@ -34,15 +34,37 @@ $("#form").addEventListener("submit", async e => {
     const cred = await signInAnonymously(auth);
     const now = Date.now();
     await setDoc(doc(db, "guests", cred.user.uid), { title, name, cat, first: false, status: "review", source: "self", createdAt: now, arrivedAt: now });
-    signOut(auth).catch(() => {});
     $("#doneName").textContent = `${title ? title + " " : ""}${name}，已送出報到`;
     $("#form").hidden = true; $("#done").hidden = false;
+    watchMine(cred.user.uid);
   } catch (ex) {
     showErr(ex && ex.code === "auth/operation-not-allowed" ? "系統尚未開啟訪客報到，請洽接待人員。" : "送出失敗，請確認網路後再試一次，或洽接待人員。");
   } finally { sending = false; btn.disabled = false; btn.textContent = "送出報到"; }
 });
 
+// 送出後保持這個匿名身分，等接待老師確認後在畫面顯示報到序號（安全規則只允許讀自己這一筆）
+let unwatch = null;
+function showNo(state, no) {
+  const box = $("#myNo"); box.hidden = false; box.className = "myno " + state;
+  box.innerHTML = state === "ok" ? `<small>您的報到序號</small><b>${String(no).padStart(3, "0")}</b><span>號</span>`
+    : state === "wait" ? `<small>報到序號</small><span class="wait">接待人員確認後，會在這裡顯示您的號碼…</span>`
+    : `<small>報到序號</small><span class="wait">請洽接待人員</span>`;
+}
+function watchMine(uid) {
+  if (unwatch) unwatch();
+  showNo("wait");
+  unwatch = onSnapshot(doc(db, "guests", uid), s => {
+    if (!s.exists()) { showNo("gone"); return; }
+    const d = s.data();
+    if (typeof d.no === "number") { showNo("ok", d.no); $("#doneMsg").textContent = "已通知司儀與校長，歡迎您蒞臨。"; }
+    else showNo("wait");
+  }, () => { $("#myNo").hidden = true; });
+}
+
 $("#again").addEventListener("click", () => {
+  if (unwatch) { unwatch(); unwatch = null; }
+  signOut(auth).catch(() => {});
+  $("#myNo").hidden = true; $("#doneMsg").textContent = "接待人員確認後會通知司儀與校長，歡迎您蒞臨。";
   $("#form").reset(); $("#form").hidden = false; $("#done").hidden = true;
   const def = document.getElementById("cat1"); if (def) def.checked = true;
   $("#f-title").focus();

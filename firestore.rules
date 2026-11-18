@@ -68,12 +68,24 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // 報到序號計數器 {n}：每場活動從 1 開始
+    //   工作人員取號時只能往上加；管理者結案或切換活動時可以重設
+    match /settings/counter {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.keys().hasOnly(['n']) && request.resource.data.n is int;
+      allow update: if request.resource.data.keys().hasOnly(['n']) && request.resource.data.n is int
+        && (isAdmin() || (isStaff() && request.resource.data.n > resource.data.n));
+      allow delete: if false;
+    }
+
     // 來賓名單
     //   管理者：匯入、編輯、刪除、清空
     //   工作人員：報到、確認、移動卡片；只能新增臨時來賓，只能刪除臨時來賓與自助報到
     //   來賓：只能新增自己的一筆待確認報到，讀不到任何資料
     match /guests/{id} {
-      allow read, update: if isStaff();
+      // 來賓（匿名）只能讀自己送出的那一筆，用來在手機上看到報到序號
+      allow get: if isStaff() || (request.auth != null && request.auth.uid == id);
+      allow list, update: if isStaff();
       allow create: if isAdmin()
         || (isStaff() && request.resource.data.source == 'walkin')
         || validSelf(id);
