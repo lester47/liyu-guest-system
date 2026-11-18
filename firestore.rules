@@ -8,7 +8,7 @@ service cloud.firestore {
     // ★ 第一次使用前必改：系統管理者（最高權限）的電子郵件，全部小寫
     //   只有這個帳號能新增或移除「管理者」，也無法從網站上被移除。
     //   要換人時，改這裡並重新發布規則即可。
-    function ownerEmail() { return '請改成系統管理者的電子郵件@gmail.com'; }
+    function ownerEmail() { return 'lester47@gmail.com'; }
 
     // 工作人員只能用 Google 或「帳號密碼」登入，而且電子郵件必須已驗證
     function isStaffLogin() {
