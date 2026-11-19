@@ -223,7 +223,9 @@ function render() {
 
 // ---------- 接待：搜尋結果 ----------
 function renderSearch(q, qRaw) {
-  const hit = g => nameKey(g.name).includes(q) || nameKey(g.title).includes(q) || nameKey((g.title || "") + (g.name || "")).includes(q);
+  // 多個關鍵字用空白隔開，每個字都要出現在「單位＋頭銜＋姓名」裡，例：「前山 校長」「縣府 王」
+  const terms = qRaw.split(/\s+/).map(nameKey).filter(Boolean);
+  const hit = g => { const all = nameKey((g.title || "") + (g.name || "")); return terms.every(t => all.includes(t)); };
   const ST_RANK = { expected: 0, arrived: 1, introduced: 2 };
   const list = guests.filter(g => g.status !== "review" && hit(g))
     .sort((a, b) => (ST_RANK[a.status] ?? 3) - (ST_RANK[b.status] ?? 3) || catRank(a.cat) - catRank(b.cat) || (a.title || "").localeCompare(b.title || "", "zh-Hant"));
