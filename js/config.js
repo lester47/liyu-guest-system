@@ -16,6 +16,12 @@ export const firebaseConfig = {
   appId: "1:150463961873:web:eb28ed05e372d085218ab0"
 };
 
+// 1-1. Google 登入用戶端 ID（手機、平板、Safari 登入用）
+//      Google Cloud 主控台 → API 和服務 → 憑證 → OAuth 2.0 用戶端 ID →
+//      「Web client (auto created by Google Service)」的用戶端 ID。
+//      並在同一頁的「已授權的 JavaScript 來源」加入網站網址（例：https://你的帳號.github.io）。
+export const googleClientId = "150463961873-gsin6sbaap1u6t4h70vjhumhmqerqu2r.apps.googleusercontent.com";
+
 // 2. 學校與活動名稱（活動名稱之後也能在網站的「名單與 QR」頁修改）
 export const SCHOOL = {
   name: "南投縣鯉魚國小",

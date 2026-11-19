@@ -1,6 +1,6 @@
 // 鯉魚國小來賓通報系統：工作人員端（接待報到／介紹台／名單與 QR）
 import {
-  configured, auth, db, googleLogin, inAppBrowser, openInLineExternal, onAuthStateChanged, signOut,
+  configured, auth, db, googleLogin, preloadGoogle, inAppBrowser, openInLineExternal, onAuthStateChanged, signOut,
   signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification,
   collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit,
   writeBatch, runTransaction
@@ -1021,6 +1021,8 @@ $("#loginBtn").addEventListener("click", async () => {
     if (e && e.code === "auth/unauthorized-domain") $("#loginErr").textContent = `這個網址（${location.hostname}）還沒加到 Firebase 的授權網域，請管理者依 README 設定。`;
     else if (e && (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request")) return;
     else if (e && e.code === "app/in-app-browser") { showInAppNotice(e.app); return; }
+    else if (e && e.code === "app/gis-not-ready") $("#loginErr").textContent = "Google 登入元件還在載入，請等 2 秒再按一次「以 Google 帳號登入」。";
+    else if (e && /^gis\//.test(e.code)) $("#loginErr").textContent = "Google 登入沒有完成（" + e.code + "），請再試一次；若一直失敗，請改用下方帳號密碼登入，並通知系統管理者。";
     else if (e && e.code === "auth/popup-blocked") $("#loginErr").textContent = "登入視窗被瀏覽器擋住了。請再按一次「以 Google 帳號登入」；若還是不行，請到瀏覽器設定允許「彈出式視窗」。";
     else $("#loginErr").textContent = "登入失敗：" + (e && e.code || "請再試一次");
     $("#loginErr").hidden = false;
@@ -1040,6 +1042,7 @@ function showInAppNotice(app) {
   });
 }
 {
+  const p = preloadGoogle(); if (p) p.catch(() => {});
   const app = inAppBrowser();
   if (app === "LINE") openInLineExternal();
   else if (app) showInAppNotice(app);
