@@ -1,6 +1,6 @@
 // 鯉魚國小來賓通報系統：工作人員端（接待報到／介紹台／名單與 QR）
 import {
-  configured, auth, db, googleLogin, onAuthStateChanged, signOut,
+  configured, auth, db, googleLogin, inAppBrowser, openInLineExternal, onAuthStateChanged, signOut,
   signInWithEmailAndPassword, sendPasswordResetEmail, sendEmailVerification,
   collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit,
   writeBatch, runTransaction
@@ -1019,12 +1019,31 @@ $("#loginBtn").addEventListener("click", async () => {
   try { await googleLogin(); }
   catch (e) {
     if (e && e.code === "auth/unauthorized-domain") $("#loginErr").textContent = `這個網址（${location.hostname}）還沒加到 Firebase 的授權網域，請管理者依 README 設定。`;
-    else if (e && e.code === "auth/popup-closed-by-user") return;
+    else if (e && (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request")) return;
+    else if (e && e.code === "app/in-app-browser") { showInAppNotice(e.app); return; }
+    else if (e && e.code === "auth/popup-blocked") $("#loginErr").textContent = "登入視窗被瀏覽器擋住了。請再按一次「以 Google 帳號登入」；若還是不行，請到瀏覽器設定允許「彈出式視窗」。";
     else $("#loginErr").textContent = "登入失敗：" + (e && e.code || "請再試一次");
     $("#loginErr").hidden = false;
   }
 });
 $("#logoutBtn").addEventListener("click", () => signOut(auth));
+
+// 在 LINE／Facebook 等 App 裡開啟時，Google 登入會失敗：LINE 自動改用手機瀏覽器開，其他 App 提示複製網址
+function showInAppNotice(app) {
+  const url = location.origin + location.pathname;
+  const err = $("#loginErr");
+  err.innerHTML = `目前是在 <b>${esc(app)}</b> 裡面開啟，Google 不允許在這裡登入。<br>請點右上角或右下角的「⋯」選單，選「用瀏覽器開啟」（iPhone／iPad 選 Safari，Android 選 Chrome）；或複製網址貼到瀏覽器。也可以直接用下方「帳號密碼」登入。<div class="btnrow" style="margin-top:.5em"><button class="btn sm" type="button" id="copyUrlBtn">複製網址</button></div>`;
+  err.hidden = false;
+  $("#copyUrlBtn").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(url); toast("已複製網址，請貼到 Safari 或 Chrome"); }
+    catch { prompt("請複製這個網址，貼到 Safari 或 Chrome：", url); }
+  });
+}
+{
+  const app = inAppBrowser();
+  if (app === "LINE") openInLineExternal();
+  else if (app) showInAppNotice(app);
+}
 
 drawLanding();
 if (!configured) {
@@ -1040,6 +1059,7 @@ async function handleUser(u) {
   me = u && !u.isAnonymous ? { email: (u.email || "").toLowerCase(), displayName: u.displayName || "" } : null;
   $("#userName").hidden = !me; $("#logoutBtn").hidden = !me;
   $("#loginForms").hidden = !!me; $("#verifyBox").hidden = true; $("#requestBox").hidden = true; $("#loginErr").hidden = true;
+  if (!me && inAppBrowser()) showInAppNotice(inAppBrowser());
   applyRole("none");
   if (me) {
     const isPw = (u.providerData || []).some(p => p.providerId === "password");
